@@ -1756,25 +1756,35 @@ class SocialAuthBase(DesktopFlowTestingLib, ZulipTestCase, ABC):
         multiuse_object_key = multiuse_confirmation.confirmation_key
         account_data_dict = self.get_account_data_dict(email=email, name=name)
 
-        # First, try to sign up for closed realm without using an invitation
-        result = self.social_auth_test(
-            account_data_dict, expect_choose_email_screen=True, subdomain=subdomain, is_signup=True
-        )
-        result = self.client_get(result["Location"])
-        # Verify that we're unable to sign up, since this is a closed realm
-        self.assertEqual(result.status_code, 200)
-        self.assert_in_success_response(["Sign up"], result)
+        # We test with password-based backends disabled, to verify that the additional
+        # restrictions on signup that are exercised in such configurations don't break
+        # the external auth signup flow.
+        backend_path = f"zproject.backends.{self.BACKEND_CLASS.__name__}"
+        with self.settings(
+            AUTHENTICATION_BACKENDS=(backend_path, "zproject.backends.ZulipDummyBackend")
+        ):
+            # First, try to sign up for closed realm without using an invitation
+            result = self.social_auth_test(
+                account_data_dict,
+                expect_choose_email_screen=True,
+                subdomain=subdomain,
+                is_signup=True,
+            )
+            result = self.client_get(result["Location"])
+            # Verify that we're unable to sign up, since this is a closed realm
+            self.assertEqual(result.status_code, 200)
+            self.assert_in_success_response(["Sign up"], result)
 
-        result = self.social_auth_test(
-            account_data_dict,
-            subdomain=subdomain,
-            is_signup=True,
-            expect_choose_email_screen=True,
-            multiuse_object_key=multiuse_object_key,
-        )
-        self.stage_two_of_registration(
-            result, realm, subdomain, email, name, name, self.BACKEND_CLASS.full_name_validated
-        )
+            result = self.social_auth_test(
+                account_data_dict,
+                subdomain=subdomain,
+                is_signup=True,
+                expect_choose_email_screen=True,
+                multiuse_object_key=multiuse_object_key,
+            )
+            self.stage_two_of_registration(
+                result, realm, subdomain, email, name, name, self.BACKEND_CLASS.full_name_validated
+            )
 
         # Verify the PreregistrationUser object was set up as expected.
         prereg_user = PreregistrationUser.objects.last()
@@ -5074,17 +5084,29 @@ class GenericOpenIdConnectTest(SocialAuthBaseWithSyncAttrTest):
         return result
 
     @override
-    def social_auth_test_finish(self, *args: Any, **kwargs: Any) -> "TestHttpResponse":
+    def social_auth_test_finish(
+        self,
+        result: "TestHttpResponse",
+        account_data_dict: dict[str, str],
+        *args: Any,
+        **kwargs: Any,
+    ) -> "TestHttpResponse":
         # Trying to generate a (access_token, id_token) pair here in tests that would
         # successfully pass validation by validate_and_return_id_token is impractical
         # and unnecessary (see python-social-auth implementation of the method for
         # how the validation works).
-        # We can simply mock the method to make it succeed and return an empty dict, because
-        # the return value is not used for anything.
+        # We can simply mock the method to make it succeed and return just the
+        # claims that are used: iss for ExternalAuthID lookup, and sub, which
+        # python-social-auth requires to match the sub from the UserInfo endpoint.
         with mock.patch.object(
-            GenericOpenIdConnectBackend, "validate_and_return_id_token", return_value={}
+            GenericOpenIdConnectBackend,
+            "validate_and_return_id_token",
+            return_value={
+                "iss": account_data_dict.get("iss", self.BASE_OIDC_URL),
+                "sub": account_data_dict["sub"],
+            },
         ):
-            return super().social_auth_test_finish(*args, **kwargs)
+            return super().social_auth_test_finish(result, account_data_dict, *args, **kwargs)
 
     @override
     def register_extra_endpoints(
@@ -5132,6 +5154,7 @@ class GenericOpenIdConnectTest(SocialAuthBaseWithSyncAttrTest):
             family_name = None
 
         return dict(
+            sub="123-test-sub",
             email=email,
             name=name,
             nickname="somenickname",
@@ -5493,6 +5516,236 @@ class GenericOpenIdConnectTest(SocialAuthBaseWithSyncAttrTest):
         comprehensive config_error pages.
         """
         return
+
+    def test_external_auth_id_oidc_login(self) -> None:
+        """
+        Test that OIDC login creates an ExternalAuthID record on first login,
+        and uses it for subsequent logins even if the email changes at the IdP.
+        """
+        hamlet = self.example_user("hamlet")
+
+        idps_config_dict = copy.deepcopy(settings.SOCIAL_AUTH_OIDC_ENABLED_IDPS)
+        idps_config_dict["testoidc"]["enable_external_auth_id_auth"] = True
+        sub_value = "testsub"
+        expected_method_name = f"oidc:<testoidc>:<{self.BASE_OIDC_URL}>"
+
+        # First login: no ExternalAuthID exists yet. One should be created.
+        self.assertEqual(ExternalAuthID.objects.filter(user=hamlet).count(), 0)
+        account_data_dict = self.get_account_data_dict(email=self.email, name=self.name)
+        account_data_dict["sub"] = sub_value
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="INFO"),
+        ):
+            result = self.social_auth_test(
+                account_data_dict,
+                subdomain="zulip",
+            )
+        self.assertEqual(result.status_code, 302)
+        data = load_subdomain_token(result)
+        self.assertEqual(data["email"], hamlet.delivery_email)
+
+        external_auth_ids = list(ExternalAuthID.objects.filter(user=hamlet))
+        self.assert_length(external_auth_ids, 1)
+        self.assertEqual(external_auth_ids[0].external_auth_method_name, expected_method_name)
+        self.assertEqual(external_auth_ids[0].external_auth_id, sub_value)
+
+        # Login with a new email, but same sub value - user should be found by ExternalAuthID
+        # and the email should be synced.
+        new_email = "hamlet_new@zulip.com"
+        new_account_data_dict = self.get_account_data_dict(email=new_email, name=self.name)
+        new_account_data_dict["sub"] = sub_value
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="INFO") as m,
+        ):
+            result = self.social_auth_test(
+                new_account_data_dict,
+                subdomain="zulip",
+            )
+        self.assertEqual(result.status_code, 302)
+        data = load_subdomain_token(result)
+        self.assertEqual(data["email"], new_email)
+        hamlet.refresh_from_db()
+        self.assertEqual(hamlet.delivery_email, new_email)
+
+        self.assertIn("has mismatched email. Syncing:", m.output[0])
+
+        # The same sub from a different issuer isn't matched to the existing
+        # ExternalAuthID. The user is found by email and linked to the new issuer.
+        new_account_data_dict["iss"] = "https://other-issuer.example.com"
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="INFO"),
+        ):
+            result = self.social_auth_test(
+                new_account_data_dict,
+                subdomain="zulip",
+            )
+        data = load_subdomain_token(result)
+        self.assertEqual(data["email"], new_email)
+        self.assertEqual(
+            set(
+                ExternalAuthID.objects.filter(user=hamlet).values_list(
+                    "external_auth_method_name", "external_auth_id"
+                )
+            ),
+            {
+                (expected_method_name, sub_value),
+                ("oidc:<testoidc>:<https://other-issuer.example.com>", sub_value),
+            },
+        )
+
+    def test_external_auth_id_oidc_email_conflict(self) -> None:
+        """
+        Test that email is NOT synced when another user already has the target email.
+        """
+
+        hamlet = self.example_user("hamlet")
+        othello = self.example_user("othello")
+
+        idps_config_dict = copy.deepcopy(settings.SOCIAL_AUTH_OIDC_ENABLED_IDPS)
+        idps_config_dict["testoidc"]["enable_external_auth_id_auth"] = True
+        sub_value = "testsub"
+        expected_method_name = f"oidc:<testoidc>:<{self.BASE_OIDC_URL}>"
+
+        account_data_dict = self.get_account_data_dict(email=self.email, name=self.name)
+        account_data_dict["sub"] = sub_value
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="INFO"),
+        ):
+            result = self.social_auth_test(
+                account_data_dict,
+                subdomain="zulip",
+            )
+        self.assertEqual(result.status_code, 302)
+        data = load_subdomain_token(result)
+        self.assertEqual(data["email"], hamlet.delivery_email)
+
+        external_auth_ids = list(ExternalAuthID.objects.filter(user=hamlet))
+        self.assert_length(external_auth_ids, 1)
+        self.assertEqual(external_auth_ids[0].external_auth_method_name, expected_method_name)
+        self.assertEqual(external_auth_ids[0].external_auth_id, sub_value)
+
+        # Try to login with othello's email but hamlet's sub - authentication should find hamlet
+        # by ExternalAuthID but NOT sync the email since othello already has it.
+        othello_email = othello.delivery_email
+        conflict_data = self.get_account_data_dict(email=othello_email, name=self.name)
+        conflict_data["sub"] = sub_value
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="INFO") as m,
+        ):
+            result = self.social_auth_test(
+                conflict_data,
+                subdomain="zulip",
+            )
+        self.assertEqual(result.status_code, 302)
+        data = load_subdomain_token(result)
+        self.assertEqual(data["email"], hamlet.delivery_email)
+
+        hamlet.refresh_from_db()
+        # Email should NOT have changed.
+        self.assertEqual(hamlet.delivery_email, self.email)
+        self.assertIn(
+            f"Can't sync email for user {hamlet.id}: "
+            f"another user exists with target email {othello_email}",
+            m.output[1],
+        )
+
+    def test_external_auth_id_oidc_account_linked_to_different_sub(self) -> None:
+        """
+        Test that login is refused when the account with the matching email is
+        already linked to a different sub, rather than relinking the account.
+        """
+        hamlet = self.example_user("hamlet")
+        realm = hamlet.realm
+
+        idps_config_dict = copy.deepcopy(settings.SOCIAL_AUTH_OIDC_ENABLED_IDPS)
+        idps_config_dict["testoidc"]["enable_external_auth_id_auth"] = True
+
+        account_data_dict = self.get_account_data_dict(email=self.email, name=self.name)
+        account_data_dict["sub"] = "original_sub"
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="INFO"),
+        ):
+            result = self.social_auth_test(
+                account_data_dict,
+                subdomain="zulip",
+            )
+        data = load_subdomain_token(result)
+        self.assertEqual(data["email"], hamlet.delivery_email)
+
+        account_data_dict["sub"] = "new_sub"
+        with (
+            self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict),
+            self.assertLogs(self.logger_string, level="WARNING") as m,
+        ):
+            result = self.social_auth_test(
+                account_data_dict,
+                subdomain="zulip",
+            )
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result["Location"], realm.url + "/login/")
+        self.assertEqual(
+            m.output,
+            [
+                self.logger_output(
+                    f"Can't log in user {hamlet.id} via ExternalAuthID new_sub: "
+                    "account is already linked to ExternalAuthID original_sub",
+                    "warning",
+                )
+            ],
+        )
+
+        external_auth_ids = list(ExternalAuthID.objects.filter(realm=realm))
+        self.assert_length(external_auth_ids, 1)
+        self.assertEqual(external_auth_ids[0].user, hamlet)
+        self.assertEqual(external_auth_ids[0].external_auth_id, "original_sub")
+
+    @override_settings(TERMS_OF_SERVICE_VERSION=None)
+    def test_external_auth_id_oidc_registration(self) -> None:
+        email = "newuser@zulip.com"
+        name = "New User"
+        subdomain = "zulip"
+        realm = get_realm("zulip")
+        idps_config_dict = copy.deepcopy(settings.SOCIAL_AUTH_OIDC_ENABLED_IDPS)
+        idps_config_dict["testoidc"]["enable_external_auth_id_auth"] = True
+        sub_value = "newuser_sub"
+        # The method name includes the issuer URL, which can be long.
+        issuer = (
+            "https://sso.engineering.example-university.edu/realms/department-of-computer-science"
+        )
+
+        account_data_dict = self.get_account_data_dict(email=email, name=name)
+        account_data_dict["sub"] = sub_value
+        account_data_dict["iss"] = issuer
+        with self.settings(SOCIAL_AUTH_OIDC_ENABLED_IDPS=idps_config_dict):
+            result = self.social_auth_test(
+                account_data_dict,
+                subdomain=subdomain,
+                is_signup=True,
+            )
+            self.stage_two_of_registration(
+                result,
+                realm,
+                subdomain,
+                email,
+                name,
+                name,
+                self.BACKEND_CLASS.full_name_validated,
+            )
+        user_profile = get_user_by_delivery_email(email, realm)
+        self.assertTrue(user_profile.is_active)
+        external_auth_ids = list(ExternalAuthID.objects.filter(user=user_profile))
+        self.assert_length(external_auth_ids, 1)
+        self.assertEqual(
+            external_auth_ids[0].external_auth_method_name,
+            f"oidc:<testoidc>:<{issuer}>",
+        )
+        self.assertEqual(external_auth_ids[0].external_auth_id, sub_value)
 
 
 class GitHubAuthBackendTest(SocialAuthBase):
@@ -7875,6 +8128,16 @@ class DjangoToLDAPUsernameTests(ZulipTestCase):
             self.assertTrue(user_profile.is_active)
 
 
+# A realistic Active Directory objectSid value. Values of such binary attributes
+# generally aren't valid utf-8, so django-auth-ldap hands them to us as bytes.
+EXAMPLE_OBJECT_SID = bytes.fromhex("010500000000000515000000a065cf7e784b9b5fe77c8770091f0200")
+# An objectSid value that happens to be valid utf-8, and thus gets decoded to a str
+# by django-auth-ldap before it reaches us. This is a rare, but possible, edge case.
+EXAMPLE_UTF8_DECODABLE_OBJECT_SID = bytes.fromhex(
+    "0105000000000005150000000102030405060708090a0b0c51040000"
+)
+
+
 class ZulipLDAPTestCase(ZulipTestCase):
     @override
     def setUp(self) -> None:
@@ -8124,6 +8387,53 @@ class TestLDAP(ZulipLDAPTestCase):
         self.assertEqual(new_external_auth_id.realm_id, realm.id)
         self.assertEqual(new_external_auth_id.external_auth_method_name, "ldap")
         self.assertEqual(new_external_auth_id.external_auth_id, "123456789")
+
+        # The account is recreated in LDAP with the same email but a new
+        # unique_account_id. The login is refused rather than relinking
+        # the Zulip account to the new LDAP account.
+        self.change_ldap_user_attr(username, "homePhone", "987654321")
+        with self.assertLogs("zulip.auth.ldap", level="WARNING") as mock_log:
+            user_profile = self.backend.authenticate(
+                request=mock.MagicMock(),
+                username=username,
+                password=self.ldap_password("hamlet"),
+                realm=get_realm("zulip"),
+            )
+        self.assertIsNone(user_profile)
+        self.assertEqual(
+            mock_log.output,
+            [
+                f"WARNING:zulip.auth.ldap:Can't log in user {hamlet.id} via ExternalAuthID 987654321: account is already linked to ExternalAuthID 123456789"
+            ],
+        )
+        external_auth_ids = list(ExternalAuthID.objects.filter(user=hamlet))
+        self.assert_length(external_auth_ids, 1)
+        self.assertEqual(external_auth_ids[0].external_auth_id, "123456789")
+
+    @override_settings(
+        AUTHENTICATION_BACKENDS=("zproject.backends.ZulipLDAPAuthBackend",),
+        LDAP_EMAIL_ATTR="mail",
+        AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "objectSid"},
+        LDAP_UNIQUE_ACCOUNT_ID_IS_BINARY=True,
+    )
+    def test_external_auth_id_login_with_binary_unique_account_id_attribute(self) -> None:
+        """
+        Attributes that are the natural choice for unique_account_id in Active Directory,
+        such as objectSid, have binary values - which we store hex-encoded.
+        """
+        hamlet = self.example_user("hamlet")
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_OBJECT_SID)
+
+        user_profile = self.backend.authenticate(
+            request=mock.MagicMock(),
+            username=self.ldap_username("hamlet"),
+            password=self.ldap_password("hamlet"),
+            realm=get_realm("zulip"),
+        )
+        self.assertEqual(hamlet.id, user_profile.id)
+
+        external_auth_id = ExternalAuthID.objects.get(user=hamlet)
+        self.assertEqual(external_auth_id.external_auth_id, EXAMPLE_OBJECT_SID.hex())
 
     @override_settings(
         AUTHENTICATION_BACKENDS=("zproject.backends.ZulipLDAPAuthBackend",),
@@ -9046,6 +9356,143 @@ class TestZulipLDAPUserPopulator(ZulipLDAPTestCase):
 
     @override_settings(
         LDAP_EMAIL_ATTR="mail",
+        AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "objectSid"},
+        LDAP_UNIQUE_ACCOUNT_ID_IS_BINARY=True,
+    )
+    def test_sync_creates_external_auth_id_record_for_binary_attribute(self) -> None:
+        hamlet = self.example_user("hamlet")
+
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_OBJECT_SID)
+        sync_user_from_ldap(hamlet, mock.Mock())
+        self.assertEqual(
+            ExternalAuthID.objects.get(user=hamlet).external_auth_id, EXAMPLE_OBJECT_SID.hex()
+        )
+
+        # A binary value that django-auth-ldap managed to decode to a str has to end up
+        # stored in the same way as one that reaches us as bytes.
+        ExternalAuthID.objects.filter(user=hamlet).delete()
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_UTF8_DECODABLE_OBJECT_SID)
+        sync_user_from_ldap(hamlet, mock.Mock())
+        self.assertEqual(
+            ExternalAuthID.objects.get(user=hamlet).external_auth_id,
+            EXAMPLE_UTF8_DECODABLE_OBJECT_SID.hex(),
+        )
+
+    @override_settings(
+        LDAP_EMAIL_ATTR="mail",
+        AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "objectSid"},
+    )
+    def test_sync_with_binary_unique_account_id_attribute_misconfigured(self) -> None:
+        hamlet = self.example_user("hamlet")
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_OBJECT_SID)
+
+        with (
+            self.assertRaises(AssertionError) as e,
+            self.assertLogs("django_auth_ldap", level="WARNING"),
+        ):
+            sync_user_from_ldap(hamlet, mock.Mock())
+
+        self.assertEqual(
+            str(e.exception),
+            "Attribute objectSid configured as unique_account_id has non-string values. "
+            "You might need to set LDAP_UNIQUE_ACCOUNT_ID_IS_BINARY to True.",
+        )
+
+    @override_settings(
+        LDAP_EMAIL_ATTR="mail",
+        AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "objectSid"},
+        LDAP_UNIQUE_ACCOUNT_ID_IS_BINARY=True,
+    )
+    def test_sync_via_external_auth_id_binary_attribute(self) -> None:
+        hamlet = self.example_user("hamlet")
+        hamlet_dn = "uid=hamlet,ou=users,dc=zulip,dc=com"
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_OBJECT_SID)
+        ExternalAuthID.objects.create(
+            user=hamlet,
+            realm=hamlet.realm,
+            external_auth_method_name="ldap",
+            external_auth_id=EXAMPLE_OBJECT_SID.hex(),
+        )
+        self.change_ldap_user_attr("hamlet", "mail", "new-hamlet@zulip.com")
+
+        # Our fake LDAP directory can't match binary values in a search filter, so we
+        # answer the search ourselves - and verify that the filter sent to the LDAP
+        # server is the escaped octet form it expects for a binary value.
+        logger = logging.getLogger("zulip.sync_ldap_user_data")
+        with (
+            mock.patch.object(
+                self.mock_ldap,
+                "search_s",
+                return_value=[(hamlet_dn, self.mock_ldap.directory[hamlet_dn])],
+            ) as mock_search_s,
+            self.assertLogs(logger, level="INFO") as log_output,
+        ):
+            sync_user_from_ldap(hamlet, logger)
+
+        mock_search_s.assert_called_once_with(
+            "ou=users,dc=zulip,dc=com",
+            ldap.SCOPE_ONELEVEL,
+            r"(objectSid=\01\05\00\00\00\00\00\05\15\00\00\00\a0\65\cf\7e"
+            r"\78\4b\9b\5f\e7\7c\87\70\09\1f\02\00)",
+            None,
+        )
+
+        hamlet.refresh_from_db()
+        self.assertEqual(hamlet.delivery_email, "new-hamlet@zulip.com")
+
+        self.assertIn(
+            f"INFO:zulip.sync_ldap_user_data:Syncing user new-hamlet@zulip.com (id={hamlet.id})"
+            f" via external auth id. Result DN: {hamlet_dn}",
+            log_output.output,
+        )
+        self.assertIn(
+            f"INFO:zulip.sync_ldap_user_data:User {hamlet.id},"
+            f" being synced via ExternalAuthId {EXAMPLE_OBJECT_SID.hex()},"
+            " has mismatched email. Syncing: hamlet@zulip.com => new-hamlet@zulip.com",
+            log_output.output,
+        )
+
+    @override_settings(
+        LDAP_EMAIL_ATTR="mail",
+        AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "objectSid"},
+        LDAP_UNIQUE_ACCOUNT_ID_IS_BINARY=True,
+    )
+    def test_sync_via_external_auth_id_binary_attribute_with_non_hex_value(self) -> None:
+        # An ExternalAuthID record can predate unique_account_id being switched to
+        # a binary attribute, in which case its value isn't hex.
+        hamlet = self.example_user("hamlet")
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_OBJECT_SID)
+        external_auth_id_obj = ExternalAuthID.objects.create(
+            user=hamlet,
+            realm=hamlet.realm,
+            external_auth_method_name="ldap",
+            external_auth_id="uid=hamlet,ou=users,dc=zulip,dc=com",
+        )
+
+        logger = logging.getLogger("zulip.sync_ldap_user_data")
+        with (
+            self.assertLogs(logger, level="WARNING") as log_output,
+            self.assertLogs("zulip.auth.ldap", level="WARNING") as ldap_log_output,
+        ):
+            sync_user_from_ldap(hamlet, logger)
+
+        self.assertIn(
+            f"WARNING:zulip.sync_ldap_user_data:ExternalAuthID {external_auth_id_obj.id}"
+            f" for user {hamlet.id} is not a valid value of the binary attribute objectSid",
+            log_output.output,
+        )
+
+        # The user gets synced via their email address instead, which fixes up the record.
+        self.assertIn(
+            f"WARNING:zulip.auth.ldap:User {hamlet.id} had mismatched ExternalAuthID record. "
+            f"Updating uid=hamlet,ou=users,dc=zulip,dc=com => {EXAMPLE_OBJECT_SID.hex()}",
+            ldap_log_output.output,
+        )
+        external_auth_id_obj.refresh_from_db()
+        self.assertEqual(external_auth_id_obj.external_auth_id, EXAMPLE_OBJECT_SID.hex())
+
+    @override_settings(
+        LDAP_EMAIL_ATTR="mail",
         AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "dn"},
     )
     def test_sync_via_external_auth_id_end_to_end(self) -> None:
@@ -9228,6 +9675,24 @@ class TestZulipLDAPUserPopulator(ZulipLDAPTestCase):
 
 
 class TestQueryLDAP(ZulipLDAPTestCase):
+    @override_settings(AUTHENTICATION_BACKENDS=("zproject.backends.ZulipLDAPAuthBackend",))
+    def test_query_with_binary_unique_account_id(self) -> None:
+        self.change_ldap_user_attr("hamlet", "objectSid", EXAMPLE_OBJECT_SID)
+        with self.settings(
+            AUTH_LDAP_USER_ATTR_MAP={"full_name": "cn", "unique_account_id": "objectSid"},
+            LDAP_UNIQUE_ACCOUNT_ID_IS_BINARY=True,
+        ):
+            values = query_ldap(self.example_email("hamlet"))
+
+        # The unique_account_id is displayed the way it gets stored.
+        self.assertEqual(
+            values,
+            [
+                "full_name: King Hamlet",
+                f"unique_account_id: {EXAMPLE_OBJECT_SID.hex()}",
+            ],
+        )
+
     @override_settings(AUTHENTICATION_BACKENDS=("zproject.backends.EmailAuthBackend",))
     def test_ldap_not_configured(self) -> None:
         values = query_ldap(self.example_email("hamlet"))

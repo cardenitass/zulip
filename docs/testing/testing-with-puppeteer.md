@@ -48,7 +48,7 @@ The test function presses the `x` key, waits for the
 `#private_message_recipient` input element to appear, verifies its
 content is empty, and then closes the compose box. The
 `waitForSelector` step here (and in most tests) is critical; tests
-that don't wait properly often fail nonderministically, because the
+that don't wait properly often fail nondeterministically, because the
 test will work or not depending on whether the browser updates the UI
 before or after executing the next step in the test.
 
@@ -74,7 +74,7 @@ integration](continuous-integration.md):
   affects any of the selectors used in the tests? If so, the test may
   just need to be updated for your changes.
 - Does the test fail deterministically when you run it locally using
-  e.g., `./tools/test-js-with-puppeteer compose.ts`? If so, you can
+  e.g., `./tools/test-js-with-puppeteer compose.test.ts`? If so, you can
   iteratively debug to see the failure.
 - Does the test fail nondeterministically? If so, the problem is
   likely that a `waitForSelector` statement is either missing or not

@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import orjson
+
 from zerver.lib.test_classes import WebhookTestCase
 from zerver.lib.webhooks.git import COMMITS_LIMIT
 
@@ -79,22 +81,22 @@ class GogsHookTests(WebhookTestCase):
         self.check_webhook("pull_request__merged", expected_topic_name, expected_message)
 
     def test_pull_request_reopened(self) -> None:
-        expected_topic_name = "test / PR #1349 reopened"
+        expected_topic_name = "test / PR #2 reopened"
         expected_message = """kostekIV reopened [PR #2](https://try.gogs.io/kostekIV/test/pulls/2) from `c` to `master`."""
         self.check_webhook("pull_request__reopened", expected_topic_name, expected_message)
 
     def test_pull_request_edited(self) -> None:
-        expected_topic_name = "test / PR #1349 Test"
+        expected_topic_name = "test / PR #2 Test"
         expected_message = """kostekIV edited [PR #2](https://try.gogs.io/kostekIV/test/pulls/2)."""
         self.check_webhook("pull_request__edited", expected_topic_name, expected_message)
 
     def test_pull_request_assigned(self) -> None:
-        expected_topic_name = "test / PR #1349 Test"
+        expected_topic_name = "test / PR #2 Test"
         expected_message = """kostekIV assigned kostekIV to [PR #2](https://try.gogs.io/kostekIV/test/pulls/2) from `c` to `master`."""
         self.check_webhook("pull_request__assigned", expected_topic_name, expected_message)
 
     def test_pull_request_synchronized(self) -> None:
-        expected_topic_name = "test / PR #1349 Test"
+        expected_topic_name = "test / PR #2 Test"
         expected_message = """kostekIV synchronized [PR #2](https://try.gogs.io/kostekIV/test/pulls/2) from `c` to `master`."""
         self.check_webhook("pull_request__synchronized", expected_topic_name, expected_message)
 
@@ -127,6 +129,18 @@ class GogsHookTests(WebhookTestCase):
         expected_topic_name = "test / issue #3 New test issue"
         expected_message = """kostekIV [commented](https://try.gogs.io/kostekIV/test/issues/3#issuecomment-3635) on [issue #3](https://try.gogs.io/kostekIV/test/issues/3):\n\n``` quote\nTest comment\n```"""
         self.check_webhook("issue_comment__new", expected_topic_name, expected_message)
+
+    def test_issue_comment_in_pr(self) -> None:
+        expected_topic_name = "test / PR #3 New test issue"
+        expected_message = """kostekIV [commented](https://try.gogs.io/kostekIV/test/issues/3#issuecomment-3635) on [PR #3](https://try.gogs.io/kostekIV/test/pulls/3):\n\n``` quote\nTest comment\n```"""
+        payload = orjson.loads(self.get_body("issue_comment__new"))
+        payload["issue"]["pull_request"] = {"merged": False, "merged_at": None}
+        self.check_webhook(
+            "issue_comment__new",
+            expected_topic_name,
+            expected_message,
+            custom_payload=payload,
+        )
 
     def test_issue_comment_edited(self) -> None:
         expected_topic_name = "test / issue #3 New test issue"

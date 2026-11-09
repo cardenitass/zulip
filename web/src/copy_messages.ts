@@ -71,6 +71,50 @@ function get_selected_message_content_elements(): NodeListOf<HTMLElement> | unde
         .querySelectorAll(".message_content");
 }
 
+// First selected range start through last selected range end.
+// Firefox <147 splits a contiguous selection into several ranges
+// around `user-select: none` nodes.
+function selection_extent_range(): Range {
+    const selection = window.getSelection();
+    assert(selection !== null && selection.rangeCount > 0);
+    const first = selection.getRangeAt(0);
+    if (selection.rangeCount === 1) {
+        return first;
+    }
+    const last = selection.getRangeAt(selection.rangeCount - 1);
+    const extent = document.createRange();
+    extent.setStart(first.startContainer, first.startOffset);
+    extent.setEnd(last.endContainer, last.endOffset);
+    return extent;
+}
+
+function selection_covers_message_content($row: JQuery, range: Range): boolean {
+    const content = the($row).querySelector(".message_content");
+    assert(content !== null);
+    return range.intersectsNode(content);
+}
+
+// "end" when the selection starts after the previous message's
+// body, for example on a /me timestamp or reminder, and ends
+// in the middle of this message.
+// "start" when the range begins inside the first body.
+function bookend_ellipsis_side(range: Range, content: Element): RangeContainer {
+    return range.isPointInRange(content, 0) ? "end" : "start";
+}
+
+// Drop a bookend row whose .message_content is outside the selection.
+function drop_unselected_bookend_rows(copy_rows: JQuery[]): void {
+    const range = selection_extent_range();
+    const $first = copy_rows[0];
+    if ($first !== undefined && !selection_covers_message_content($first, range)) {
+        copy_rows.shift();
+    }
+    const $last = copy_rows.at(-1);
+    if ($last !== undefined && !selection_covers_message_content($last, range)) {
+        copy_rows.pop();
+    }
+}
+
 // Returns the inner HTML of the `.message_content` element
 // for the first or last message of a single range selection.
 // The caller is expected to only pass the first or last message
@@ -144,9 +188,11 @@ function maybe_expand_selection_for_first_and_last_messages(
     copy_rows: JQuery[],
     range_count: number,
 ): void {
-    // This is only meant for a multi-message selection involving
-    // multiple ranges.
-    assert(range_count > 1 && copy_rows.length > 1);
+    // Firefox <147 can emit multiple ranges for a single-row
+    // selection; expanding is only for a multi-row copy.
+    if (range_count <= 1 || copy_rows.length <= 1) {
+        return;
+    }
 
     if (navigator.userAgent.includes("Chrome")) {
         blueslip.error("Multiple ranges detected in Chrome for a multi-message selection.");
@@ -179,23 +225,30 @@ been even the best workaround back then).
 
 https://github.com/zulip/zulip/commit/fc0b7c00f16316a554349f0ad58c6517ebdd7ac4
 
-The idea is that we build a temp div, let jQuery process the
-selection, then restore the selection on a zero-second timer back
-to the original selection.
+The idea is that we build a temp div, which copy_handler then
+writes to the clipboard as HTML and plain text. Returning `false`
+indicates that we prefer the browser's native copy and have not
+manipulated the temp copy div.
 
 Do not be afraid to change this code if you understand
 how modern browsers deal with copy/paste.  Just test
 your changes carefully.
 */
-function construct_copy_div($div: JQuery, start_id: number, end_id: number): void {
+function construct_copy_div($div: JQuery, start_id: number, end_id: number): boolean {
     if (message_lists.current === undefined) {
-        return;
+        return false;
     }
     let $first_message_element;
     let $last_message_element;
     const copy_rows = rows.visible_range(start_id, end_id);
-    const range_count = window.getSelection()?.rangeCount;
-    if (range_count && range_count > 1) {
+    const range_count = window.getSelection()?.rangeCount ?? 0;
+    // Trim before expanding a Firefox <147 multi-range selection,
+    // which can have rangeCount > 1 with fewer contentful rows.
+    drop_unselected_bookend_rows(copy_rows);
+    if (copy_rows.length === 0) {
+        return false;
+    }
+    if (range_count > 1) {
         // Expand selection to select content from all the messages
         // belonging to the multi-message selection.
         // We do this only for Firefox where multi-message selections are
@@ -213,19 +266,6 @@ function construct_copy_div($div: JQuery, start_id: number, end_id: number): voi
         // a single range for a multi-message selection.
         const selected_message_content_elements = get_selected_message_content_elements();
         assert(selected_message_content_elements !== undefined);
-        // Case where the last message doesn't have any highlighted `.message_content`.
-        // Here, end_id is set to id of the message whose username at the top
-        // was highlighted, but has no highlighted `.message_content`.
-        // (See analyze_selection for details.)
-        // So the actually useful/contentful last message of this selection is
-        // at copy_rows[copy_rows.length - 2]
-        if (selected_message_content_elements.length === copy_rows.length - 1) {
-            copy_rows.splice(-1, 1);
-            if (copy_rows.length === 0) {
-                // In case this just involved selecting the username of a message.
-                return;
-            }
-        }
         assert(copy_rows[0] && copy_rows.at(-1));
         const first_selected_message_content_element = the(copy_rows[0]).querySelector(
             ".message_content",
@@ -234,9 +274,16 @@ function construct_copy_div($div: JQuery, start_id: number, end_id: number): voi
             ".message_content",
         );
         assert(first_selected_message_content_element && last_selected_message_content_element);
+        const first_bookend_side =
+            selected_message_content_elements.length === 1
+                ? bookend_ellipsis_side(
+                      selection_extent_range(),
+                      first_selected_message_content_element,
+                  )
+                : "start";
         $first_message_element = $(
             get_html_for_bookend_message_content(
-                "start",
+                first_bookend_side,
                 first_selected_message_content_element,
                 selected_message_content_elements[0],
             ),
@@ -319,6 +366,7 @@ function construct_copy_div($div: JQuery, start_id: number, end_id: number): voi
     if (should_include_start_recipient_header) {
         construct_recipient_header($start_row).prependTo($div);
     }
+    return true;
 }
 
 // We want to grab the closest katex span up the tree
@@ -518,6 +566,186 @@ function maybe_update_range_for_code_blocks(range: Range, ev: ClipboardEvent): b
     return false;
 }
 
+// Elements that start on a line of their own, as they do on screen.
+const PLAIN_TEXT_BLOCK_TAGS = new Set([
+    "BLOCKQUOTE",
+    "DIV",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "HR",
+    "LI",
+    "OL",
+    "PRE",
+    "TABLE",
+    "TR",
+    "UL",
+]);
+
+function get_line_breaks_around(element: Element): {before: number; after: number} {
+    if (element.tagName === "P") {
+        // As with the `message-header paste output` rule in
+        // compose_paste, the recipient header sits on the line
+        // directly above the first sender's name.
+        if (element.getAttribute("data-message-header-paragraph") === "true") {
+            return {before: 2, after: 1};
+        }
+        return {before: 2, after: 2};
+    }
+    if (PLAIN_TEXT_BLOCK_TAGS.has(element.tagName)) {
+        return {before: 1, after: 1};
+    }
+    return {before: 0, after: 0};
+}
+
+// These match the `white-space` rules in rendered_markdown.css.
+function preserves_whitespace(element: Element, parent_preserves_whitespace: boolean): boolean {
+    if (element.classList.contains("code-buttons-container")) {
+        return false;
+    }
+    return (
+        parent_preserves_whitespace ||
+        element.tagName === "PRE" ||
+        element.tagName === "CODE" ||
+        element.classList.contains("stream-topic-inner") ||
+        element.classList.contains("decorated-channel-name")
+    );
+}
+
+// Returns the text a reader sees in the copy div, for `text/plain`.
+// Blocks start on a line of their own, a paragraph is set apart by a
+// blank line, and whitespace is collapsed except where it is displayed
+// as-is.
+export function get_plain_text_for_copy_div(copy_div: Element): string {
+    let plain_text = "";
+    // Line breaks to add before the next text.
+    //
+    // Where several block boundaries meet with no text between them,
+    // this is the most line breaks that any one of them needs.
+    // For example, between two messages from the same recipient,
+    // the copy div has:
+    //
+    //     <div>See the docs.</div><p></p><b>Desdemona: </b>
+    //
+    // `</div>` needs 1 line break, and `<p>` and `</p>` need 2 each.
+    // Taking the largest, 2, leaves one blank line before the next
+    // sender's name:
+    //
+    //     See the docs.
+    //
+    //     Desdemona:
+    //
+    // Adding them up would give 5 line breaks, and so four blank lines.
+    let pending_line_breaks = 0;
+    // Newlines that `plain_text` already ends with, from a `<br>` or
+    // the last line of a code block.
+    let trailing_line_breaks = 0;
+    // Whether `plain_text` ends with the tab between two table cells.
+    // This is tracked, rather than read from the end of `plain_text`,
+    // because checking the end of a string built up with `+=` makes
+    // the browser copy all of it.
+    let ends_with_tab = false;
+    let pending_space = false;
+
+    function is_at_line_start(): boolean {
+        return (
+            plain_text === "" ||
+            pending_line_breaks > 0 ||
+            trailing_line_breaks > 0 ||
+            ends_with_tab
+        );
+    }
+
+    function request_line_breaks(count: number): void {
+        if (count > 0) {
+            pending_line_breaks = Math.max(pending_line_breaks, count);
+            pending_space = false;
+        }
+    }
+
+    function append(text: string): void {
+        if (pending_line_breaks > trailing_line_breaks && plain_text !== "") {
+            plain_text += "\n".repeat(pending_line_breaks - trailing_line_breaks);
+            trailing_line_breaks = pending_line_breaks;
+        } else if (pending_space) {
+            plain_text += " ";
+            trailing_line_breaks = 0;
+        }
+        pending_line_breaks = 0;
+        pending_space = false;
+
+        plain_text += text;
+        ends_with_tab = text.endsWith("\t");
+        let text_trailing_line_breaks = 0;
+        while (text.at(-1 - text_trailing_line_breaks) === "\n") {
+            text_trailing_line_breaks += 1;
+        }
+        if (text_trailing_line_breaks === text.length) {
+            // Text that is only newlines, such as a `<br>`, joins the
+            // newlines already at the end of `plain_text`, so the count
+            // covers the whole run: after two `<br>`s in a row, it is 2.
+            trailing_line_breaks += text_trailing_line_breaks;
+        } else {
+            // Newlines before this text are no longer at the end.
+            trailing_line_breaks = text_trailing_line_breaks;
+        }
+    }
+
+    function append_collapsible_text(text: string): void {
+        let collapsed_text = text.replaceAll(/[\t\n\r ]+/g, " ");
+        if (collapsed_text.startsWith(" ")) {
+            // We ignore whitespace at the start of a line, like the browser does.
+            pending_space ||= !is_at_line_start();
+            collapsed_text = collapsed_text.slice(1);
+        }
+        if (collapsed_text === "") {
+            return;
+        }
+        if (collapsed_text.endsWith(" ")) {
+            append(collapsed_text.slice(0, -1));
+            pending_space = true;
+        } else {
+            append(collapsed_text);
+        }
+    }
+
+    function append_children(parent: Node, parent_preserves_whitespace: boolean): void {
+        for (const child of parent.childNodes) {
+            if (child.nodeType === Node.TEXT_NODE) {
+                const text = child.nodeValue ?? "";
+                if (!parent_preserves_whitespace) {
+                    append_collapsible_text(text);
+                } else if (text !== "") {
+                    append(text);
+                }
+            } else if (child instanceof Element) {
+                if (child.tagName === "BR") {
+                    pending_space = false;
+                    append("\n");
+                    continue;
+                }
+                const line_breaks = get_line_breaks_around(child);
+                request_line_breaks(line_breaks.before);
+                append_children(child, preserves_whitespace(child, parent_preserves_whitespace));
+                request_line_breaks(line_breaks.after);
+                if (
+                    (child.tagName === "TD" || child.tagName === "TH") &&
+                    child.nextElementSibling !== null
+                ) {
+                    pending_space = false;
+                    append("\t");
+                }
+            }
+        }
+    }
+
+    append_children(copy_div, false);
+    return plain_text;
+}
+
 export function copy_handler(ev: ClipboardEvent): boolean {
     // This is the main handler for copying message content via
     // `Ctrl+C` in Zulip (note that this is totally independent of the
@@ -603,10 +831,14 @@ export function copy_handler(ev: ClipboardEvent): boolean {
     // more difficult since we can get a range (start_id and end_id) for
     // each selection `Range`.
     const $div = $("<div>");
-    construct_copy_div($div, start_id, end_id);
+    if (!construct_copy_div($div, start_id, end_id)) {
+        // No message content in the selection so we let the browser copy
+        // the highlighted text natively.
+        return false;
+    }
 
     const html_content = $div.html().trim();
-    const plain_text = $div.text().trim();
+    const plain_text = get_plain_text_for_copy_div(the($div)).trim();
     ev.clipboardData?.setData("text/html", html_content);
     ev.clipboardData?.setData("text/plain", plain_text);
 

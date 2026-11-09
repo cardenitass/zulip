@@ -523,6 +523,9 @@ def patch_bot_backend(
         do_change_user_role(bot, role, acting_user=user_profile, notify=False)
 
     if bot_owner_id is not None and bot.bot_owner_id != bot_owner_id:
+        if not user_profile.is_realm_admin:
+            raise OrganizationAdministratorRequiredError
+
         try:
             owner = get_user_profile_by_id_in_realm(bot_owner_id, user_profile.realm)
         except UserProfile.DoesNotExist:
@@ -563,6 +566,8 @@ def patch_bot_backend(
         )
 
     if config_data is not None:
+        if bot.bot_type != UserProfile.EMBEDDED_BOT:
+            raise JsonableError(_("Only embedded bots have config_data."))
         do_update_bot_config_data(bot, config_data)
 
     if len(request.FILES) == 0:

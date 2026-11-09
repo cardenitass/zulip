@@ -585,10 +585,20 @@ test("maybe_update_raw_content", () => {
     assert.equal(message1.raw_content, "hello world");
 });
 
+// Expected cross-conversation links, as message_store returns them.
+function message_link(stream_id, topic, message_id) {
+    return {stream_id, topic, message_id, kind: "message"};
+}
+
+// A topic link is anchored on a message if it was a topic permalink.
+function topic_link(stream_id, topic, anchor_message_id = undefined) {
+    return {stream_id, topic, message_id: anchor_message_id, kind: "topic"};
+}
+
 test("save_topic_links", () => {
     function assert_maps_empty() {
-        assert.deepEqual(message_store.topic_links_by_to_for_testing(), new Map());
-        assert.deepEqual(message_store.topic_links_by_from_for_testing(), new Map());
+        assert.deepEqual(message_store.topic_links_incoming_for_testing(), new Map());
+        assert.deepEqual(message_store.topic_links_outgoing_for_testing(), new Map());
     }
 
     function message_with_content(content) {
@@ -630,42 +640,36 @@ test("save_topic_links", () => {
     let message = message_with_content(`<div><a href='${link}'>a link!</a>`);
     message_store.save_topic_links(message);
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([[10, new Map([["hello", new Map([[0, [message.id]]])]])]]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 message.stream_id,
-                new Map([
-                    [
-                        message.topic,
-                        new Map([
-                            [
-                                message.id,
-                                [
-                                    {
-                                        stream_id: 10,
-                                        topic: "hello",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
-                        ]),
-                    ],
-                ]),
+                new Map([[message.topic, new Map([[message.id, [topic_link(10, "hello")]]])]]),
             ],
         ]),
     );
 
     message_store.clear_topic_links_for_testing();
 
-    // A link to a message we don't know about doesn't save
+    // A link to a message we don't know about is saved with the narrow
+    // data in the link, and remembered so it can be re-saved with the
+    // message's current narrow data once it arrives.
     link = "/#narrow/channel/10-design/topic/hello/near/22";
     message = message_with_content(`<div><a href='${link}'>a link!</a>`);
     message_store.save_topic_links(message);
-    assert_maps_empty();
+    assert.deepEqual(
+        message_store.topic_links_incoming_for_testing(),
+        new Map([[10, new Map([["hello", new Map([[22, [message.id]]])]])]]),
+    );
+    assert.deepEqual(
+        message_store.pending_message_link_targets_for_testing(),
+        new Map([[22, new Set([message.id])]]),
+    );
+    message_store.clear_topic_links_for_testing();
 
     // A link to a message we do know about does save
     const linked_message = {
@@ -682,29 +686,18 @@ test("save_topic_links", () => {
     });
     message_store.save_topic_links(message);
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([[10, new Map([["hello", new Map([[linked_message.id, [message.id]]])]])]]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 message.stream_id,
                 new Map([
                     [
                         message.topic,
-                        new Map([
-                            [
-                                message.id,
-                                [
-                                    {
-                                        stream_id: 10,
-                                        topic: "hello",
-                                        message_id: linked_message.id,
-                                    },
-                                ],
-                            ],
-                        ]),
+                        new Map([[message.id, [message_link(10, "hello", linked_message.id)]]]),
                     ],
                 ]),
             ],
@@ -792,31 +785,20 @@ test("get and update topic links to/from narrow", () => {
         "/#narrow/channel/10-design/topic/goodbye/",
     );
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([
             [design.stream_id, new Map([["goodbye", new Map([[NO_MESSAGE_ID, [message1.id]]])]])],
         ]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 development.stream_id,
                 new Map([
                     [
                         "engineering",
-                        new Map([
-                            [
-                                message1.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
-                        ]),
+                        new Map([[message1.id, [topic_link(design.stream_id, "goodbye")]]]),
                     ],
                 ]),
             ],
@@ -838,7 +820,7 @@ test("get and update topic links to/from narrow", () => {
         "/#narrow/channel/10-design/topic/second-goodbye/",
     );
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([
             [
                 design.stream_id,
@@ -857,7 +839,7 @@ test("get and update topic links to/from narrow", () => {
         ]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 development.stream_id,
@@ -868,17 +850,9 @@ test("get and update topic links to/from narrow", () => {
                             [
                                 message1.id,
                                 [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(design.stream_id, "goodbye"),
                                     // to "second-goodbye" is new
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "second-goodbye",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(design.stream_id, "second-goodbye"),
                                 ],
                             ],
                         ]),
@@ -891,18 +865,7 @@ test("get and update topic links to/from narrow", () => {
                 new Map([
                     [
                         "new client",
-                        new Map([
-                            [
-                                message5.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
-                        ]),
+                        new Map([[message5.id, [topic_link(design.stream_id, "goodbye")]]]),
                     ],
                 ]),
             ],
@@ -920,7 +883,7 @@ test("get and update topic links to/from narrow", () => {
         "/#narrow/channel/10-design/topic/hello/",
     );
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([
             [
                 design.stream_id,
@@ -934,7 +897,7 @@ test("get and update topic links to/from narrow", () => {
         ]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 development.stream_id,
@@ -943,29 +906,12 @@ test("get and update topic links to/from narrow", () => {
                         "engineering",
                         new Map([
                             // message3 is new and earlier
-                            [
-                                message3.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "hello",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
+                            [message3.id, [topic_link(design.stream_id, "hello")]],
                             [
                                 message1.id,
                                 [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "second-goodbye",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(design.stream_id, "goodbye"),
+                                    topic_link(design.stream_id, "second-goodbye"),
                                 ],
                             ],
                         ]),
@@ -977,18 +923,7 @@ test("get and update topic links to/from narrow", () => {
                 new Map([
                     [
                         "new client",
-                        new Map([
-                            [
-                                message5.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
-                        ]),
+                        new Map([[message5.id, [topic_link(design.stream_id, "goodbye")]]]),
                     ],
                 ]),
             ],
@@ -1001,7 +936,7 @@ test("get and update topic links to/from narrow", () => {
     // once even though it's linked from multiple messages. But the high level topic
     // maps will have data from both messages.
     assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "hello"), [
-        {stream_id: development.stream_id, topic: "engineering", message_id: message3.id},
+        message_link(development.stream_id, "engineering", message3.id),
     ]);
     // There are currently three links from #development>engineering
     assert.equal(
@@ -1018,21 +953,21 @@ test("get and update topic links to/from narrow", () => {
     );
     // Now only message4 will show up, since it occurs first.
     assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "hello"), [
-        {stream_id: development.stream_id, topic: "engineering", message_id: message4.id},
+        message_link(development.stream_id, "engineering", message4.id),
     ]);
     // * There are still only three links from #development>engineering, since message4's
     //   "hello" link was redundant.
     // * We sort the data by message id, so message 99 to "hello" is listed before message
     //   201 to goodbye and second-goodbye, even though we added the "hello" link after.
     assert.deepEqual(message_store.topic_links_from_narrow(development.stream_id, "engineering"), [
-        {stream_id: design.stream_id, topic: "hello", message_id: undefined},
-        {stream_id: design.stream_id, topic: "goodbye", message_id: undefined},
-        {stream_id: design.stream_id, topic: "second-goodbye", message_id: undefined},
+        topic_link(design.stream_id, "hello"),
+        topic_link(design.stream_id, "goodbye"),
+        topic_link(design.stream_id, "second-goodbye"),
     ]);
 
     // The high level topic maps will have data from both messages.
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([
             [
                 design.stream_id,
@@ -1051,7 +986,7 @@ test("get and update topic links to/from narrow", () => {
         ]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 development.stream_id,
@@ -1059,42 +994,16 @@ test("get and update topic links to/from narrow", () => {
                     [
                         "engineering",
                         new Map([
-                            [
-                                message3.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "hello",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
+                            [message3.id, [topic_link(design.stream_id, "hello")]],
                             [
                                 message1.id,
                                 [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "second-goodbye",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(design.stream_id, "goodbye"),
+                                    topic_link(design.stream_id, "second-goodbye"),
                                 ],
                             ],
                             // message4 is new
-                            [
-                                message4.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "hello",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
+                            [message4.id, [topic_link(design.stream_id, "hello")]],
                         ]),
                     ],
                 ]),
@@ -1104,18 +1013,7 @@ test("get and update topic links to/from narrow", () => {
                 new Map([
                     [
                         "new client",
-                        new Map([
-                            [
-                                message5.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
-                        ]),
+                        new Map([[message5.id, [topic_link(design.stream_id, "goodbye")]]]),
                     ],
                 ]),
             ],
@@ -1149,7 +1047,7 @@ test("get and update topic links to/from narrow", () => {
     );
 
     assert.deepEqual(
-        message_store.topic_links_by_to_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
         new Map([
             [
                 design.stream_id,
@@ -1182,7 +1080,7 @@ test("get and update topic links to/from narrow", () => {
         ]),
     );
     assert.deepEqual(
-        message_store.topic_links_by_from_for_testing(),
+        message_store.topic_links_outgoing_for_testing(),
         new Map([
             [
                 development.stream_id,
@@ -1190,58 +1088,21 @@ test("get and update topic links to/from narrow", () => {
                     [
                         "engineering",
                         new Map([
-                            [
-                                message3.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "hello",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
+                            [message3.id, [topic_link(design.stream_id, "hello")]],
                             [
                                 message1.id,
                                 [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "second-goodbye",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(design.stream_id, "goodbye"),
+                                    topic_link(design.stream_id, "second-goodbye"),
                                 ],
                             ],
-                            [
-                                message4.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "hello",
-                                        message_id: undefined,
-                                    },
-                                ],
-                            ],
+                            [message4.id, [topic_link(design.stream_id, "hello")]],
                         ]),
                     ],
                     // link from "testing" to a specific message is new
                     [
                         "testing",
-                        new Map([
-                            [
-                                message7.id,
-                                [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: 5,
-                                    },
-                                ],
-                            ],
-                        ]),
+                        new Map([[message7.id, [message_link(design.stream_id, "goodbye", 5)]]]),
                     ],
                 ]),
             ],
@@ -1254,30 +1115,16 @@ test("get and update topic links to/from narrow", () => {
                             [
                                 message5.id,
                                 [
-                                    {
-                                        stream_id: design.stream_id,
-                                        topic: "goodbye",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(design.stream_id, "goodbye"),
                                     // The link to the #design channel (no topic) is not tracked.
                                     // Link to #sales>new-client is new
-                                    {
-                                        stream_id: sales.stream_id,
-                                        topic: "new client",
-                                        message_id: undefined,
-                                    },
+                                    topic_link(sales.stream_id, "new client"),
                                 ],
                             ],
                             // Link from message6 is new
                             [
                                 message6.id,
-                                [
-                                    {
-                                        stream_id: sales.stream_id,
-                                        topic: "new client",
-                                        message_id: message5.id,
-                                    },
-                                ],
+                                [message_link(sales.stream_id, "new client", message5.id)],
                             ],
                         ]),
                     ],
@@ -1301,14 +1148,14 @@ test("get and update topic links to/from narrow", () => {
     // Links are sorted by message id even though the earlier message
     // was added after the later message.
     assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "goodbye"), [
-        {stream_id: sales.stream_id, topic: "new client", message_id: 3},
-        {stream_id: development.stream_id, topic: "engineering", message_id: 201},
-        {stream_id: development.stream_id, topic: "testing", message_id: 400},
+        message_link(sales.stream_id, "new client", 3),
+        message_link(development.stream_id, "engineering", 201),
+        message_link(development.stream_id, "testing", 400),
     ]);
 
     // Links from #sales>new-client to #sales>new-client don't show up in either list
     assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "new client"), [
-        {stream_id: design.stream_id, topic: "goodbye", message_id: undefined},
+        topic_link(design.stream_id, "goodbye"),
     ]);
     assert.deepEqual(message_store.topic_links_to_narrow(sales.stream_id, "new client"), []);
 
@@ -1324,10 +1171,10 @@ test("get and update topic links to/from narrow", () => {
     message1.stream_id = sales.stream_id;
     message1.topic = "super engineering";
     assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "goodbye"), [
-        {stream_id: sales.stream_id, topic: "new client", message_id: 3},
+        message_link(sales.stream_id, "new client", 3),
         // This existing link is updated to the new stream and topic for message 201
-        {stream_id: sales.stream_id, topic: "super engineering", message_id: 201},
-        {stream_id: development.stream_id, topic: "testing", message_id: 400},
+        message_link(sales.stream_id, "super engineering", 201),
+        message_link(development.stream_id, "testing", 400),
     ]);
 
     // This message has the link to the message with id 400 in #development>testing
@@ -1346,18 +1193,18 @@ test("get and update topic links to/from narrow", () => {
         message_store.topic_links_to_narrow(design.stream_id, "goodbye"),
         // Links to the original narrow aren't affected
         [
-            {stream_id: sales.stream_id, topic: "new client", message_id: 3},
-            {stream_id: sales.stream_id, topic: "super engineering", message_id: 201},
+            message_link(sales.stream_id, "new client", 3),
+            message_link(sales.stream_id, "super engineering", 201),
         ],
     );
     assert.deepEqual(message_store.topic_links_to_narrow(sales.stream_id, "signing off"), [
         // This link from the moved message now links from the new topic
-        {stream_id: development.stream_id, topic: "testing", message_id: 400},
+        message_link(development.stream_id, "testing", 400),
     ]);
 
     // Moving message5, which has both these links in it (which you can see above in the map)
     assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "new client"), [
-        {stream_id: design.stream_id, topic: "goodbye", message_id: undefined},
+        topic_link(design.stream_id, "goodbye"),
     ]);
     message_store.process_topic_edit({
         message_ids: [message5.id],
@@ -1373,17 +1220,17 @@ test("get and update topic links to/from narrow", () => {
     // (which was hidden as a link to its own topic) now shows up, following
     // message5 to its new conversation.
     assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "new client"), [
-        {stream_id: design.stream_id, topic: "client logo", message_id: message5.id},
+        message_link(design.stream_id, "client logo", message5.id),
     ]);
     // Now they're both in the new stream/topic links, but we get an extra link too!
     assert.deepEqual(message_store.topic_links_from_narrow(design.stream_id, "client logo"), [
-        {stream_id: design.stream_id, topic: "goodbye", message_id: undefined},
+        topic_link(design.stream_id, "goodbye"),
         // This was an existing link to the old topic from message5. It still links to the
         // old topic (the topic still exists, separately from the message that was moved)
         // and previously wasn't showing up because it was a link from a topic to itself.
         // Now it does show up here because it's a link to a topic different from itself,
         // now that the message is moved.
-        {stream_id: sales.stream_id, topic: "new client", message_id: undefined},
+        topic_link(sales.stream_id, "new client"),
     ]);
 
     // ------ Now let's test editing a message's id
@@ -1396,19 +1243,19 @@ test("get and update topic links to/from narrow", () => {
         "/#narrow/channel/10-design/topic/goodbye/",
     );
     assert.deepEqual(message_store.topic_links_from_narrow(development.stream_id, "testing"), [
-        {stream_id: sales.stream_id, topic: "signing off", message_id: 5},
+        message_link(sales.stream_id, "signing off", 5),
     ]);
     assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "signing off"), [
-        {stream_id: design.stream_id, topic: "goodbye", message_id: undefined},
+        topic_link(design.stream_id, "goodbye"),
     ]);
     message_store.reify_message_id({old_id: message2.id, new_id: 55});
     assert.deepEqual(message_store.topic_links_from_narrow(development.stream_id, "testing"), [
-        {stream_id: sales.stream_id, topic: "signing off", message_id: 55},
+        message_link(sales.stream_id, "signing off", 55),
     ]);
     // This looks the same but is now stored under a message by a different id,
     // which will let us delete it shortly.
     assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "signing off"), [
-        {stream_id: design.stream_id, topic: "goodbye", message_id: undefined},
+        topic_link(design.stream_id, "goodbye"),
     ]);
 
     // ------ Now let's test removing a message
@@ -1452,19 +1299,799 @@ test("get and update topic links to/from narrow", () => {
     message8.stream_id = design.stream_id;
     message8.topic = "spending";
     assert.deepEqual(message_store.topic_links_from_narrow(development.stream_id, "✔ budget"), [
-        {stream_id: design.stream_id, topic: "spending", message_id: message8.id},
+        message_link(design.stream_id, "spending", message8.id),
     ]);
     assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "spending"), [
-        {stream_id: development.stream_id, topic: "✔ budget", message_id: message9.id},
+        message_link(development.stream_id, "✔ budget", message9.id),
     ]);
+
+    // ------ Now let's test that topic names are matched case-insensitively
+    message_store.clear_topic_links_for_testing();
+    const message10 = add_message(600, sales.stream_id, "Pricing");
+    const message11 = add_message(601, design.stream_id, "Logo");
+    // A link written with a different case than the topic it points to.
+    save_message_link(
+        sales.stream_id,
+        "Pricing",
+        message10.id,
+        "/#narrow/channel/10-design/topic/LOGO/",
+    );
+    // Both narrows can be looked up with any casing.
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "pricing"), [
+        topic_link(design.stream_id, "LOGO"),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Pricing", message10.id),
+    ]);
+    // A link from a topic to itself with a different case is still hidden.
+    save_message_link(
+        design.stream_id,
+        "Logo",
+        message11.id,
+        "/#narrow/channel/10-design/topic/logo/",
+    );
+    assert.deepEqual(message_store.topic_links_from_narrow(design.stream_id, "Logo"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Pricing", message10.id),
+    ]);
+    // Renaming a topic to change only its case keeps its links, and
+    // later removing the message deletes them.
+    message_store.process_topic_edit({
+        message_ids: [message10.id],
+        new_stream_id: sales.stream_id,
+        new_topic: "PRICING",
+    });
+    message10.topic = "PRICING";
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "PRICING"), [
+        topic_link(design.stream_id, "LOGO"),
+    ]);
+    message_store.remove([message10.id]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "PRICING"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), []);
+});
+
+test("message links survive a case-only topic rename of the linking message", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    function add_message(message) {
+        message_store.update_message_cache({type: "server_message", message});
+        return message;
+    }
+    const linked_message = add_message({
+        id: 601,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    const linking_message = add_message({
+        id: 602,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${linked_message.id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+
+    // update_messages sets the new topic directly for a rename that only
+    // changes its case, without calling process_topic_edit.
+    linking_message.topic = "renewals";
+
+    // Deleting the linking message and then editing the message it linked
+    // to must still find the link and clean it up.
+    message_store.remove([linking_message.id]);
+    message_store.update_message_content(linked_message, "<p>edited</p>");
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), []);
+});
+
+test("editing a message keeps links to it", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    const linked_message = {
+        id: 611,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: `<a href="/#narrow/channel/12-sales/topic/Pricing">pricing</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message: linked_message});
+    const linking_message = {
+        id: 612,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${linked_message.id}">link</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message: linking_message});
+
+    message_store.update_message_content(linked_message, "<p>no links</p>");
+
+    assert.deepEqual(message_store.topic_links_from_narrow(design.stream_id, "Logo"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        message_link(design.stream_id, "Logo", linked_message.id),
+    ]);
+});
+
+test("message links follow the linked message's current location", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    function add_message(message) {
+        message_store.update_message_cache({type: "server_message", message});
+        return message;
+    }
+    const linked_message = add_message({
+        id: 621,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    const stale_topic_message = add_message({
+        id: 622,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/old.20logo/near/${linked_message.id}">link</a>`,
+    });
+    const stale_channel_message = add_message({
+        id: 623,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Pricing",
+        content: `<a href="/#narrow/channel/12-sales/topic/Logo/near/${linked_message.id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", stale_topic_message.id),
+        message_link(sales.stream_id, "Pricing", stale_channel_message.id),
+    ]);
+
+    message_store.process_topic_edit({
+        message_ids: [linked_message.id],
+        new_stream_id: design.stream_id,
+        new_topic: "Branding",
+    });
+    linked_message.topic = "Branding";
+    message_store.remove([stale_topic_message.id]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Pricing", stale_channel_message.id),
+    ]);
+
+    message_store.remove([linked_message.id]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), []);
+
+    const direct_message = add_message({
+        id: 624,
+        sender_id: alice.user_id,
+        type: "private",
+        display_recipient: [{id: alice.user_id}, {id: me.user_id}],
+        content: "<ignore>",
+    });
+    add_message({
+        id: 625,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Pricing",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${direct_message.id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), []);
+});
+
+test("links to a channel the user lost access to are hidden", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    const linking_message = {
+        id: 651,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Pricing",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo">link</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message: linking_message});
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), [
+        topic_link(design.stream_id, "Logo"),
+    ]);
+
+    // Losing access to a channel removes it from stream_data, but
+    // links to its topics from other channels' messages stay in the
+    // link maps.
+    stream_data.delete_sub(design.stream_id);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), []);
+
+    stream_data.add_sub_for_tests(design);
+});
+
+test("message links to a message that isn't in the store yet", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    function add_message(message) {
+        message_store.update_message_cache({type: "server_message", message});
+        return message;
+    }
+
+    // A link to a message we haven't fetched shows the channel/topic in
+    // its URL, and the message that linked to it still appears when
+    // viewing links to that channel/topic.
+    const linked_message_id = 640;
+    const linking_message = add_message({
+        id: 641,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/old.20logo/near/${linked_message_id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        message_link(design.stream_id, "old logo", linked_message_id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "old logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(
+        message_store.pending_message_link_targets_for_testing(),
+        new Map([[linked_message_id, new Set([linking_message.id])]]),
+    );
+
+    // Once the linked message is fetched, the link follows it to its
+    // current channel/topic, which here differs from the one in the URL.
+    add_message({
+        id: linked_message_id,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        message_link(design.stream_id, "Logo", linked_message_id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "old logo"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+
+    // A link to an unfetched message whose sender turns out to be muted
+    // is dropped when the message arrives.
+    muted_users.set_muted_users([{id: cindy.user_id}]);
+    const muted_message_id = 642;
+    add_message({
+        id: 643,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Pricing",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${muted_message_id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), [
+        message_link(design.stream_id, "Logo", muted_message_id),
+    ]);
+    add_message({
+        id: muted_message_id,
+        sender_id: cindy.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    muted_users.set_muted_users([]);
+
+    // A linking message removed before its target arrives leaves nothing
+    // behind.
+    const removed_linker_target_id = 644;
+    const removed_linker = add_message({
+        id: 645,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Hiring",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${removed_linker_target_id}">link</a>`,
+    });
+    message_store.remove([removed_linker.id]);
+    add_message({
+        id: removed_linker_target_id,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Hiring"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+
+    // A link edited out of the linking message before its target
+    // arrives leaves nothing behind either.
+    const edited_out_target_id = 649;
+    const edited_message = add_message({
+        id: 650,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Hiring",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${edited_out_target_id}">link</a>`,
+    });
+    message_store.update_message_content(edited_message, "no links");
+    add_message({
+        id: edited_out_target_id,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Hiring"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+
+    // A locally echoed linking message keeps its pending link across
+    // getting its server-assigned id.
+    const echoed_target_id = 646;
+    const local_id = 647.01;
+    const server_id = 648;
+    message_store.update_message_cache({
+        type: "local_message",
+        message: {
+            id: local_id,
+            sender_id: me.user_id,
+            type: "stream",
+            stream_id: sales.stream_id,
+            topic: "Launch",
+            content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${echoed_target_id}">link</a>`,
+            queue_id: 5,
+            draft_id: 6,
+        },
+    });
+    message_store.reify_message_id({old_id: local_id, new_id: server_id});
+    assert.deepEqual(
+        message_store.pending_message_link_targets_for_testing(),
+        new Map([[echoed_target_id, new Set([server_id])]]),
+    );
+    add_message({
+        id: echoed_target_id,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Branding",
+        content: "<ignore>",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Launch"), [
+        message_link(design.stream_id, "Branding", echoed_target_id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Launch", server_id),
+    ]);
+});
+
+test("links to a message that isn't in the store yet follow its moves", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    const linked_message_id = 660;
+    const linking_message = {
+        id: 661,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${linked_message_id}">link</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message: linking_message});
+
+    // Moving the linked message before it is fetched moves the link
+    // along with it, and it stays pending for when it is.
+    message_store.process_topic_edit({
+        message_ids: [linked_message_id],
+        new_stream_id: design.stream_id,
+        new_topic: "Branding",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        message_link(design.stream_id, "Branding", linked_message_id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(
+        message_store.pending_message_link_targets_for_testing(),
+        new Map([[linked_message_id, new Set([linking_message.id])]]),
+    );
+
+    message_store.update_message_cache({
+        type: "server_message",
+        message: {
+            id: linked_message_id,
+            sender_id: alice.user_id,
+            type: "stream",
+            stream_id: design.stream_id,
+            topic: "Branding",
+            content: "<ignore>",
+        },
+    });
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+
+    // A move of a topic containing both the linking message and its
+    // unfetched target, which comes later in the event, moves the
+    // link too, so it is still hidden as a link within the same topic.
+    const later_linked_message_id = 663;
+    const earlier_linking_message = {
+        id: 662,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${later_linked_message_id}">link</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message: earlier_linking_message});
+    message_store.process_topic_edit({
+        message_ids: [earlier_linking_message.id, later_linked_message_id],
+        new_stream_id: design.stream_id,
+        new_topic: "Branding",
+    });
+    earlier_linking_message.topic = "Branding";
+    assert.deepEqual(message_store.topic_links_from_narrow(design.stream_id, "Branding"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), []);
+});
+
+test("links to a message that isn't in the store yet are dropped when it is deleted", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+
+    const linked_message_id = 670;
+    const linking_message = {
+        id: 671,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/${linked_message_id}">link</a><a href="/#narrow/channel/10-design/topic/Logo">topic link</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message: linking_message});
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        message_link(design.stream_id, "Logo", linked_message_id),
+        topic_link(design.stream_id, "Logo"),
+    ]);
+
+    // Deleting the linked message before it is fetched drops the link
+    // to it, while the message's other links stay.
+    message_store.remove([linked_message_id]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        topic_link(design.stream_id, "Logo"),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+    assert.deepEqual(
+        message_store.topic_links_incoming_for_testing().get(design.stream_id).get("logo"),
+        new Map([
+            [linked_message_id, []],
+            [0, [linking_message.id]],
+        ]),
+    );
+});
+
+test("topic links follow the message their permalink is anchored on", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const sales = {name: "sales", subscribed: true, stream_id: 12};
+    stream_data.add_sub_for_tests(sales);
+    function add_message(message) {
+        message_store.update_message_cache({type: "server_message", message});
+        return message;
+    }
+
+    // A topic permalink is tracked by the message it's anchored on,
+    // like a message link, but is still a topic link.
+    const anchor_message = add_message({
+        id: 801,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: "<ignore>",
+    });
+    const linking_message = add_message({
+        id: 802,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/with/${anchor_message.id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        topic_link(design.stream_id, "Logo", anchor_message.id),
+    ]);
+    assert.deepEqual(
+        message_store.topic_links_incoming_for_testing().get(design.stream_id).get("logo"),
+        new Map([[anchor_message.id, [linking_message.id]]]),
+    );
+
+    // A plain link to the same topic is the same link, while a message
+    // link to the anchor message is a different one.
+    const other_linking_message = add_message({
+        id: 803,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Renewals",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo">topic</a><a href="/#narrow/channel/10-design/topic/Logo/near/${anchor_message.id}">message</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        topic_link(design.stream_id, "Logo", anchor_message.id),
+        message_link(design.stream_id, "Logo", anchor_message.id),
+    ]);
+
+    // Moving the anchor message moves the topic link with it, like
+    // navigating the link does, while the plain topic link stays.
+    message_store.process_topic_edit({
+        message_ids: [anchor_message.id],
+        new_stream_id: design.stream_id,
+        new_topic: "Branding",
+    });
+    anchor_message.topic = "Branding";
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        topic_link(design.stream_id, "Branding", anchor_message.id),
+        topic_link(design.stream_id, "Logo"),
+        message_link(design.stream_id, "Branding", anchor_message.id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", other_linking_message.id),
+    ]);
+
+    // Deleting the anchor message leaves the topic link as a plain link
+    // to the topic the message was last in, while the message link to
+    // it is dropped.
+    message_store.remove([anchor_message.id]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Renewals"), [
+        topic_link(design.stream_id, "Branding"),
+        topic_link(design.stream_id, "Logo"),
+    ]);
+    assert.deepEqual(
+        message_store.topic_links_incoming_for_testing().get(design.stream_id).get("branding"),
+        new Map([[0, [linking_message.id]]]),
+    );
+
+    // A permalink anchored on a message that isn't in the store yet is
+    // filed under the topic in its URL until the message arrives.
+    const pending_anchor_id = 810;
+    const pending_linking_message = add_message({
+        id: 811,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Hiring",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/with/${pending_anchor_id}">topic</a><a href="/#narrow/channel/10-design/topic/Logo/near/${pending_anchor_id}">message</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Hiring"), [
+        topic_link(design.stream_id, "Logo", pending_anchor_id),
+        message_link(design.stream_id, "Logo", pending_anchor_id),
+    ]);
+    assert.deepEqual(
+        message_store.pending_message_link_targets_for_testing(),
+        new Map([[pending_anchor_id, new Set([pending_linking_message.id])]]),
+    );
+    // When it arrives in another topic, from a muted user, the topic link
+    // still follows it there, while the message link to it is hidden.
+    muted_users.set_muted_users([{id: cindy.user_id}]);
+    add_message({
+        id: pending_anchor_id,
+        sender_id: cindy.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Branding",
+        content: "<ignore>",
+    });
+    muted_users.set_muted_users([]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Hiring"), [
+        topic_link(design.stream_id, "Branding", pending_anchor_id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+        message_link(sales.stream_id, "Hiring", pending_linking_message.id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+    // The same goes for a muted user's message that's already in the
+    // store when the links to it are saved.
+    muted_users.set_muted_users([{id: cindy.user_id}]);
+    const muted_anchor_linking_message = add_message({
+        id: 812,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Pricing",
+        content: `<a href="/#narrow/channel/10-design/topic/Branding/with/${pending_anchor_id}">topic</a><a href="/#narrow/channel/10-design/topic/Branding/near/${pending_anchor_id}">message</a>`,
+    });
+    muted_users.set_muted_users([]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Pricing"), [
+        topic_link(design.stream_id, "Branding", pending_anchor_id),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Branding"), [
+        message_link(sales.stream_id, "Renewals", linking_message.id),
+        message_link(sales.stream_id, "Hiring", pending_linking_message.id),
+        message_link(sales.stream_id, "Pricing", muted_anchor_linking_message.id),
+    ]);
+
+    // An anchor message deleted before it arrives leaves a plain link to
+    // the topic in the URL.
+    const deleted_anchor_id = 820;
+    const deleted_anchor_linking_message = add_message({
+        id: 821,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Hiring",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/with/${deleted_anchor_id}">link</a>`,
+    });
+    message_store.remove([deleted_anchor_id]);
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Hiring"), [
+        topic_link(design.stream_id, "Branding", pending_anchor_id),
+        topic_link(design.stream_id, "Logo"),
+    ]);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", other_linking_message.id),
+        message_link(sales.stream_id, "Hiring", deleted_anchor_linking_message.id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+
+    // An anchor message moved before it arrives takes the permalink
+    // with it.
+    const moved_anchor_id = 840;
+    const moved_anchor_linking_message = add_message({
+        id: 841,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Legal",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/with/${moved_anchor_id}">link</a>`,
+    });
+    message_store.process_topic_edit({
+        message_ids: [moved_anchor_id],
+        new_stream_id: design.stream_id,
+        new_topic: "Branding",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Legal"), [
+        topic_link(design.stream_id, "Branding", moved_anchor_id),
+    ]);
+    assert.deepEqual(
+        message_store
+            .topic_links_incoming_for_testing()
+            .get(design.stream_id)
+            .get("branding")
+            .get(moved_anchor_id),
+        [moved_anchor_linking_message.id],
+    );
+    assert.deepEqual(
+        message_store.pending_message_link_targets_for_testing(),
+        new Map([[moved_anchor_id, new Set([moved_anchor_linking_message.id])]]),
+    );
+    add_message({
+        id: moved_anchor_id,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Branding",
+        content: "<ignore>",
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Legal"), [
+        topic_link(design.stream_id, "Branding", moved_anchor_id),
+    ]);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+
+    // A link anchored on a message that turns out not to be in a channel
+    // is dropped, since navigating it goes to that message's conversation.
+    const dm_anchor_id = 830;
+    add_message({
+        id: 831,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Onboarding",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/with/${dm_anchor_id}">link</a>`,
+    });
+    add_message({id: dm_anchor_id, sender_id: alice.user_id, type: "private", content: "<ignore>"});
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Onboarding"), []);
+    assert.deepEqual(message_store.topic_links_to_narrow(design.stream_id, "Logo"), [
+        message_link(sales.stream_id, "Renewals", other_linking_message.id),
+        message_link(sales.stream_id, "Hiring", deleted_anchor_linking_message.id),
+    ]);
+    // So is one anchored on such a message that's already in the store.
+    add_message({
+        id: 832,
+        sender_id: bob.user_id,
+        type: "stream",
+        stream_id: sales.stream_id,
+        topic: "Onboarding",
+        content: `<a href="/#narrow/channel/10-design/topic/Branding/with/${dm_anchor_id}">link</a>`,
+    });
+    assert.deepEqual(message_store.topic_links_from_narrow(sales.stream_id, "Onboarding"), []);
+    assert.deepEqual(message_store.pending_message_link_targets_for_testing(), new Map());
+});
+
+test("reify_message_id handles a message that links to itself", () => {
+    message_store.clear_topic_links_for_testing();
+    const design = {name: "design", subscribed: true, stream_id: 10};
+    stream_data.add_sub_for_tests(design);
+    const message = {
+        id: 631,
+        sender_id: alice.user_id,
+        type: "stream",
+        stream_id: design.stream_id,
+        topic: "Logo",
+        content: `<a href="/#narrow/channel/10-design/topic/Logo/near/631">link</a>`,
+    };
+    message_store.update_message_cache({type: "server_message", message});
+
+    message_store.reify_message_id({old_id: 631, new_id: 632});
+    message_store.remove([632]);
+
+    for (const link_map of [
+        message_store.topic_links_outgoing_for_testing(),
+        message_store.topic_links_incoming_for_testing(),
+    ]) {
+        assert.equal(link_map.get(design.stream_id).get("logo").size, 0);
+    }
 });
 
 test("process_topic_edit ignores messages missing from the local cache", () => {
     message_store.clear_topic_links_for_testing();
 
     // A channel or topic move can include messages the current client
-    // hasn't fetched. The link maps only track stored messages, so such a
-    // move is a no-op for them and must not throw.
+    // hasn't fetched. With no links saved to them, such a move is a
+    // no-op for the link maps and must not throw.
     const missing_message_id = 987654;
     assert.equal(message_store.get(missing_message_id), undefined);
 
@@ -1474,6 +2101,6 @@ test("process_topic_edit ignores messages missing from the local cache", () => {
         new_topic: "moved",
     });
 
-    assert.deepEqual(message_store.topic_links_by_from_for_testing(), new Map());
-    assert.deepEqual(message_store.topic_links_by_to_for_testing(), new Map());
+    assert.deepEqual(message_store.topic_links_outgoing_for_testing(), new Map());
+    assert.deepEqual(message_store.topic_links_incoming_for_testing(), new Map());
 });

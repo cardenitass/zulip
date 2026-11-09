@@ -23,11 +23,11 @@ from zerver.actions.user_settings import do_change_user_setting
 from zerver.lib.management import ZulipBaseCommand, skip_unless_locked
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import most_recent_message, stdout_suppressed
-from zerver.models import Realm, RealmAuditLog, Recipient, UserProfile
+from zerver.models import Realm, RealmAuditLog, Recipient, UserMessage, UserProfile
 from zerver.models.realm_audit_logs import AuditLogEventType
 from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
-from zerver.models.users import get_user_profile_by_email
+from zerver.models.users import ExternalAuthID, get_user_profile_by_email
 
 
 class TestWarnNoEmail(ZulipTestCase):
@@ -559,6 +559,7 @@ class TestExport(ZulipTestCase):
                 percent_callback=mock.ANY,
                 upload=False,
                 export_as_active=None,
+                remove_files_while_archiving=False,
             )
 
         self.assertEqual(
@@ -848,11 +849,7 @@ class TestUserChangeNotifications(ZulipTestCase):
         realm = hamlet.realm
 
         # Count bot messages before changes
-        from zerver.models import Message
-
-        bot_messages_before = Message.objects.filter(
-            realm_id=realm.id, recipient__type_id=bot.id
-        ).count()
+        bot_messages_before = UserMessage.objects.filter(user_profile=bot).count()
 
         import tempfile
 
@@ -884,9 +881,7 @@ class TestUserChangeNotifications(ZulipTestCase):
             self.assertEqual(bot.full_name, "New Bot Name")
 
             # Verify bot did NOT receive a notification
-            bot_messages_after = Message.objects.filter(
-                realm_id=realm.id, recipient__type_id=bot.id
-            ).count()
+            bot_messages_after = UserMessage.objects.filter(user_profile=bot).count()
             self.assertEqual(bot_messages_before, bot_messages_after)
         finally:
             os.unlink(data_file)
@@ -918,11 +913,7 @@ class TestUserChangeNotifications(ZulipTestCase):
         bot = self.example_user("default_bot")
 
         # Count bot messages before changes
-        from zerver.models import Message
-
-        bot_messages_before = Message.objects.filter(
-            realm_id=realm.id, recipient__type_id=bot.id
-        ).count()
+        bot_messages_before = UserMessage.objects.filter(user_profile=bot).count()
 
         with stdout_suppressed():
             call_command(
@@ -934,7 +925,47 @@ class TestUserChangeNotifications(ZulipTestCase):
         self.assertEqual(bot.role, UserProfile.ROLE_MODERATOR)
 
         # Verify bot did NOT receive a notification
-        bot_messages_after = Message.objects.filter(
-            realm_id=realm.id, recipient__type_id=bot.id
-        ).count()
+        bot_messages_after = UserMessage.objects.filter(user_profile=bot).count()
         self.assertEqual(bot_messages_before, bot_messages_after)
+
+
+class TestDeleteExternalAuthIDs(ZulipTestCase):
+    def test_delete_external_auth_ids(self) -> None:
+        hamlet = self.example_user("hamlet")
+        othello = self.example_user("othello")
+        mit_user = self.mit_user("sipbtest")
+        for user, auth_method, external_auth_id in [
+            (hamlet, "ldap", "hamlet-id"),
+            (othello, "ldap", "othello-id"),
+            (hamlet, "saml:okta", "hamlet-okta-id"),
+            (mit_user, "ldap", "sipbtest-id"),
+        ]:
+            ExternalAuthID.objects.create(
+                user=user,
+                realm=user.realm,
+                external_auth_method_name=auth_method,
+                external_auth_id=external_auth_id,
+            )
+
+        with self.assertRaises(CommandError) as e:
+            call_command("delete_external_auth_ids", "--auth-method=saml:okt", "--realm=zulip")
+        self.assertEqual(
+            str(e.exception),
+            "No ExternalAuthIDs for 'saml:okt'. Present:\n  ldap (2)\n  saml:okta (1)",
+        )
+
+        with patch("builtins.print") as mock_print:
+            call_command("delete_external_auth_ids", "--auth-method=ldap", "--realm=zulip")
+        mock_print.assert_called_once_with("Deleted 2 ExternalAuthIDs for ldap.")
+        self.assertEqual(
+            set(ExternalAuthID.objects.values_list("user_id", "external_auth_method_name")),
+            {(hamlet.id, "saml:okta"), (mit_user.id, "ldap")},
+        )
+
+        with patch("builtins.print") as mock_print:
+            call_command("delete_external_auth_ids", "--auth-method=ldap", "--all-realms")
+        mock_print.assert_called_once_with("Deleted 1 ExternalAuthIDs for ldap.")
+        self.assertEqual(
+            set(ExternalAuthID.objects.values_list("user_id", "external_auth_method_name")),
+            {(hamlet.id, "saml:okta")},
+        )

@@ -37,21 +37,18 @@ export function get_reload_hash(): string {
 }
 
 export function encode_operand(term: NarrowCanonicalTerm): string {
-    let slug: string | undefined;
     switch (term.operator) {
         case "dm-including":
         case "dm":
-            slug = people.user_ids_to_slug(term.operand);
-            break;
+            return people.user_ids_to_slug(term.operand);
         case "sender":
         case "mentions":
-            slug = people.user_ids_to_slug([term.operand]);
-            break;
+            return people.user_ids_to_slug([term.operand]);
         case "channel":
             return encode_stream_id(Number.parseInt(term.operand, 10));
     }
 
-    return slug ?? internal_url.encodeHashComponent(String(term.operand));
+    return internal_url.encodeHashComponent(term.operand);
 }
 
 export function encode_stream_id(stream_id: number): string {
@@ -60,6 +57,20 @@ export function encode_stream_id(stream_id: number): string {
     const slug = stream_data.id_to_slug(stream_id);
 
     return internal_url.encode_slug(stream_id, slug);
+}
+
+function decode_user_ids(slug: string): number[] {
+    // The text from the first hyphen after a digit is only a hint,
+    // as in "15-King-Hamlet". The hyphen of "-1", which is how an
+    // unknown user is written, is not after a digit.
+    const id_list = slug.replace(/(\d)-.*/, "$1");
+    const user_ids = id_list.split(",").map((member) => {
+        const id = Number(member);
+        // A huge number parses to Infinity or an inexact number.
+        const is_user_id = util.is_numeric_string(member) && Number.isSafeInteger(id);
+        return is_user_id ? id : filter_util.UNKNOWN_USER_ID;
+    });
+    return people.sorted_other_user_ids(user_ids);
 }
 
 export function decode_operand(
@@ -71,24 +82,22 @@ export function decode_operand(
             case "sender":
                 return people.my_current_user_id();
             case "dm":
+            case "dm-including":
                 return [people.my_current_user_id()];
         }
     } else if (operator === "dm-including" || operator === "dm") {
-        const user_ids = people.slug_to_user_ids(operand);
-        if (user_ids) {
-            return user_ids;
-        }
+        return decode_user_ids(operand);
     } else if (operator === "sender" || operator === "mentions") {
-        const user_ids = people.slug_to_user_ids(operand);
-        if (user_ids?.length !== 1) {
+        const user_ids = decode_user_ids(operand);
+        if (user_ids.length !== 1) {
             // User mistyped the URL since we don't support
             // group operand for `sender` or `mentions` narrow.
-            // Returning -1 will lead to us showing a proper
+            // Returning UNKNOWN_USER_ID will lead to us showing a proper
             // user doesn't exist message in the UI.
             // Other options is to throw an error which will
             // lead to us showing a "Invalid URL" banner which
             // is not very nice looking.
-            return -1;
+            return filter_util.UNKNOWN_USER_ID;
         }
         return util.the(user_ids);
     }
@@ -125,6 +134,21 @@ export function channel_url_by_user_setting(channel_id: number): string {
 export function by_stream_topic_url(stream_id: number, topic: string): string {
     // Wrapper for web use of internal_url.by_stream_topic_url
     return internal_url.by_stream_topic_url(stream_id, topic, sub_store.maybe_get_stream_name);
+}
+
+// A topic permalink, anchored on a message in the topic so that the
+// link follows the topic if it's moved or renamed.
+export function by_stream_topic_permalink(
+    stream_id: number,
+    topic: string,
+    message_id: number,
+): string {
+    return internal_url.by_stream_topic_url(
+        stream_id,
+        topic,
+        sub_store.maybe_get_stream_name,
+        message_id,
+    );
 }
 
 // Encodes a term list into the
@@ -524,9 +548,15 @@ export function decode_dm_recipient_user_ids_from_narrow_url(narrow_url: string)
     }
 }
 
-export function decode_stream_topic_from_url(
-    url_str: string,
-): {stream_id: number; topic_name?: string; message_id?: string} | null {
+// Parses a channel, topic, or message narrow URL. For a topic permalink,
+// with_message_id is the message the link is anchored on, which the
+// link follows if the topic is moved or renamed.
+export function decode_stream_topic_from_url(url_str: string): {
+    stream_id: number;
+    topic_name?: string;
+    message_id?: string;
+    with_message_id?: string;
+} | null {
     try {
         const url = new URL(url_str, window.location.origin);
         if (url.origin !== window.location.origin || !url.hash.startsWith("#narrow")) {
@@ -559,13 +589,16 @@ export function decode_stream_topic_from_url(
         if (terms.length === 2) {
             return {stream_id, topic_name: terms[1].operand};
         }
-        if (terms[2]?.operator === "with") {
-            // For with operators, we currently discard the message ID unless
-            // otherwise specified.
-            return {stream_id, topic_name: terms[1].operand};
-        }
-        if (terms[2]?.operator !== "near") {
+        if (terms[2]?.operator !== "near" && terms[2]?.operator !== "with") {
             return null;
+        }
+        // Callers parse the message id as a number, so a URL with anything
+        // else there is malformed rather than a link to a message.
+        if (!/^\d+$/.test(terms[2].operand)) {
+            return null;
+        }
+        if (terms[2].operator === "with") {
+            return {stream_id, topic_name: terms[1].operand, with_message_id: terms[2].operand};
         }
         return {stream_id, topic_name: terms[1].operand, message_id: terms[2].operand};
     } catch {
