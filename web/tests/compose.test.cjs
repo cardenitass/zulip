@@ -302,7 +302,7 @@ test_ui("send_message_success", ({override, override_rewire}) => {
     assert.ok(draft_deleted);
 });
 
-test_ui("send_message", ({override, override_rewire, mock_template}) => {
+test_ui("send_message", ({disallow, override, override_rewire, mock_template}) => {
     mock_banners();
     clock.setSystemTime(new Date(fake_now * 1000));
 
@@ -331,10 +331,6 @@ test_ui("send_message", ({override, override_rewire, mock_template}) => {
     });
 
     override_rewire(drafts, "update_draft", () => 100);
-    override(drafts.draft_model, "getDraft", (draft_id) => {
-        assert.equal(draft_id, 100);
-        return {};
-    });
 
     // Tests start here.
     (function test_message_send_success_codepath() {
@@ -423,6 +419,12 @@ test_ui("send_message", ({override, override_rewire, mock_template}) => {
     // Tests start here.
     (function test_param_error_function_passed_from_send_message() {
         stub_state = initialize_state_stub_dict();
+        override(drafts.draft_model, "getDraft", () => ({is_sending_saving: true}));
+        let edited_draft;
+        override(drafts.draft_model, "editDraft", (draft_id, draft) => {
+            assert.equal(draft_id, 100);
+            edited_draft = draft;
+        });
 
         compose.send_message();
 
@@ -432,6 +434,18 @@ test_ui("send_message", ({override, override_rewire, mock_template}) => {
             send_msg_called: 1,
         };
         assert.deepEqual(stub_state, state);
+        assert.ok(echo_error_msg_checked);
+        assert.deepEqual(edited_draft, {is_sending_saving: false});
+    })();
+
+    (function test_error_after_message_event_deleted_draft() {
+        stub_state = initialize_state_stub_dict();
+        echo_error_msg_checked = false;
+        override(drafts.draft_model, "getDraft", () => false);
+        disallow(drafts.draft_model, "editDraft");
+
+        compose.send_message();
+
         assert.ok(echo_error_msg_checked);
     })();
 
@@ -450,6 +464,13 @@ test_ui("send_message", ({override, override_rewire, mock_template}) => {
 
         override(sent_messages, "get_new_local_id", () => "loc-55");
 
+        override(drafts.draft_model, "getDraft", () => ({is_sending_saving: true}));
+        let edited_draft;
+        override(drafts.draft_model, "editDraft", (draft_id, draft) => {
+            assert.equal(draft_id, 100);
+            edited_draft = draft;
+        });
+
         compose.send_message();
 
         const state = {
@@ -460,6 +481,7 @@ test_ui("send_message", ({override, override_rewire, mock_template}) => {
         assert.deepEqual(stub_state, state);
         assert.ok(!echo_error_msg_checked);
         assert.ok(banner_rendered);
+        assert.deepEqual(edited_draft, {is_sending_saving: false});
         assert.equal(fake_compose_box.textarea_val(), "default message");
         assert.ok(fake_compose_box.is_textarea_focused());
         assert.ok(!fake_compose_box.is_submit_button_spinner_visible());
@@ -522,7 +544,7 @@ test_ui("handle_enter_key_with_preview_open", ({override, override_rewire}) => {
     compose.handle_enter_key_with_preview_open();
 });
 
-test_ui("finish", ({override, override_rewire}) => {
+test_ui("finish", ({override, override_rewire, mock_template}) => {
     mock_banners();
 
     const fake_compose_box = new FakeComposeBox();
@@ -584,6 +606,46 @@ test_ui("finish", ({override, override_rewire}) => {
         // cleared, as would happen asynchronously on send success.
         compose.clear_compose_box();
         fake_compose_box.assert_preview_mode_is_off();
+    })();
+
+    (function test_when_scheduling_message_fails() {
+        simulate_draft_ui_interactions();
+        override_rewire(drafts, "update_compose_draft_count", noop);
+        fake_compose_box.set_textarea_val("scheduled message");
+        override_rewire(compose_ui, "compose_spinner_visible", false);
+
+        let banner_rendered = false;
+        mock_template("compose_banner/compose_banner.hbs", false, (data) => {
+            assert.equal(data.classname, "generic_compose_error");
+            assert.equal(data.banner_text, "Error sending message: Server says 400");
+            banner_rendered = true;
+            return "<banner-stub>";
+        });
+        override(channel, "post", ({url, error}) => {
+            assert.equal(url, "/json/scheduled_messages");
+            error();
+        });
+        override(channel, "xhr_error_message", () => "Error sending message: Server says 400");
+
+        assert.ok(compose.finish(true));
+
+        assert.ok(banner_rendered);
+        assert.ok(!fake_compose_box.is_submit_button_spinner_visible());
+        const draft = drafts.draft_model.getDraft(drafts.compose_draft_id);
+        assert.equal(draft.content, "scheduled message");
+        assert.equal(draft.is_sending_saving, false);
+    })();
+
+    (function test_scheduling_error_after_draft_deleted() {
+        const draft_id = drafts.compose_draft_id;
+        override(channel, "post", ({error}) => {
+            drafts.draft_model.deleteDrafts([draft_id]);
+            error();
+        });
+
+        assert.ok(compose.finish(true));
+
+        assert.equal(drafts.draft_model.getDraft(draft_id), false);
     })();
 });
 
