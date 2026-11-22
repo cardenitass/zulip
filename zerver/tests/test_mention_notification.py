@@ -58,6 +58,9 @@ class MentionNotificationTest(ZulipTestCase):
         channel_subscriptions = Subscription.objects.filter(
             user_profile=self.target, recipient__type=Recipient.STREAM
         )
+        self.assertFalse(
+            channel_subscriptions.filter(recipient=self.stream.recipient, active=True).exists()
+        )
         before = list(channel_subscriptions.values())
         bot_before = len(self.bot_messages())
         message_id = self.send()
@@ -103,9 +106,12 @@ class MentionNotificationTest(ZulipTestCase):
 
     def test_private_channel_and_revoked_access(self) -> None:
         message_id = self.send(notify=False)
+        before = len(self.bot_messages())
         self.stream.invite_only = True
         self.stream.save(update_fields=["invite_only"])
         self.assertFalse(notify_unsubscribed_mention(self.actor, message_id, self.target.id))
+        self.assert_length(self.bot_messages(), before)
+        self.assertFalse(MentionNotification.objects.filter(message_id=message_id).exists())
         with self.assertRaises(JsonableError), transaction.atomic(durable=True):
             notify_unsubscribed_mention(self.target, message_id, self.actor.id)
 
