@@ -1,8 +1,9 @@
 # ADR 001: Transactional explicit mention notifications
 
-Status: backend, concurrency, Node and migration validation passed. Browser
-integration and human review remain pending.
-Updated: 2026-11-09.
+Status: local backend, concurrency, Node, migration and browser validation
+passed for the revisions described in the evidence. Final human acceptance is
+not established by those checks.
+Updated: 2026-11-21.
 
 ## Context and decision
 
@@ -68,9 +69,11 @@ The synchronous transaction is smaller but adds rendering and DM latency to send
 load testing remains pending. The quote uses the existing quote composer and
 escaped link-label helper, not text supplied separately by the client.
 
-The migration is additive; applying it and validating its state on supported
-PostgreSQL remains required before acceptance. No destructive schema change or
-new deployment service is required.
+The migration is additive. A no-op merge migration joins the CoreX and upstream
+migration branches while preserving the identity of the existing CoreX
+migration. Both a fresh PostgreSQL database and an upgrade from a state where
+CoreX was already applied were checked locally. No new deployment service is
+required.
 
 ## Verification
 
@@ -79,6 +82,11 @@ eligibility, unchanged subscriptions, subscribed-user regression, rollback,
 sequential deduplication, and a two-thread/two-connection delivery race using
 `ZulipTransactionTestCase`. Web banner tests extend `compose_validate.test.cjs`.
 The PostgreSQL backend run passed 134 tests with transaction tests included.
-The full Node suite and migration consistency check passed. Browser integration
-is being verified with `web/e2e-tests/mention-notification.test.ts`. See
-[AV2 evidence](../evidence/av2.md) for exact blockers and remaining checks.
+The full Node suite and migration consistency check passed. The published and
+expanded `web/e2e-tests/mention-notification.test.ts` browser tests passed in a
+separate checkout with the merge migration. The expanded test checked the
+recipient's link and a known passage in the quote, as well as Notify, discarded
+selection, subscription preservation and Subscribe flows. These checks do not
+establish all authorization, concurrency, visual or human acceptance requirements
+for the final revision. See [AV2 evidence](../evidence/av2.md) for the tested
+revisions and remaining checks.
