@@ -1,5 +1,84 @@
 # CoreX AV2 — evidence and handoff
 
+## Follow-up validation — 2026-11-21
+
+Local validation on `test/7719-notify-e2e` used base
+`416dc8c483405fef2e687d811de1f57cf81c9372` plus the uncommitted migration and
+browser-test changes in this PR. Daniel Barquero Guzmán's review remains pending.
+The prior blocked attempt below is retained for history.
+
+The conflicting migration leaves both depended on `0815_merge`. The no-op
+`0819_merge_mention_notification` joins them without renaming the already
+published CoreX migration. `./tools/provision` successfully built a new database
+with both branches and the merge. On the recreated development database,
+`./manage.py migrate zerver 0815_merge --noinput`, followed by
+`./manage.py migrate zerver 0816_mentionnotification --noinput`, established a
+state with CoreX applied and the other branch unapplied. `./manage.py migrate
+--noinput` then applied 0816–0818 and the merge successfully; CoreX was not
+reapplied. `./tools/test-migrations` reported no model changes.
+
+PostgreSQL accepted connections, Redis returned `PONG`, and RabbitMQ's ping
+succeeded. The official provisioning script recreated the shared container's
+`zulip` and `zulip_base` development databases; the original source checkout and
+its local test changes were preserved. The separate source checkout used for
+validation had the base above plus the PR's migration and test files.
+
+The published test passed with only the migration fix; the expanded test also
+passed with both uncommitted PR changes. Each was run inside the separate checkout
+using `source tools/ci/activate-venv` and:
+
+```bash
+GITHUB_ACTIONS=true ./tools/test-js-with-puppeteer mention-notification
+```
+
+The expanded run covers CA1 and the browser portions of CA2, CA4 and CA5: no bot
+notice without Notify; one bot DM after explicit selection and none beforehand;
+unchanged recipient subscriptions; discarded intent after mention removal,
+channel change and cancellation; and independent Subscribe. The recipient opened
+the original through the DM link, and the known text in the original and quote
+matched. These checks do not establish all authorization, concurrency, or visual
+acceptance requirements. Two intermediate test attempts exposed a difference in
+rendered mention text and a typeahead setup problem; the final run passed after
+the test compared the known text and prepared the message correctly.
+
+## Post-AV2 validation — 2026-11-21
+
+This is the latest local validation attempt; Daniel Barquero Guzmán's review
+remains pending. The fork's `origin/main` and the clean local `main` both pointed
+to `416dc8c483405fef2e687d811de1f57cf81c9372`. The integrated implementation
+commit `e4b4c92755617f70df753e66e510020f0319e68d` is an ancestor. Branch
+`test/7719-notify-e2e` was created at that base. The existing `corex-av2` source
+tree was left intact; it was at `f828a971aedc934efd86ebd0b740bb6e4edd62c1`
+with changes to the browser and backend tests. A separate clean clone at the
+confirmed base was used for the following attempt. PostgreSQL reported accepting
+connections and Redis responded `PONG`.
+
+The published browser test was run before making any PR changes to the test:
+
+```bash
+docker exec -e GITHUB_ACTIONS=true corex-av2 bash -lc 'cd /home/github/zulip-7719-e2e && source tools/ci/activate-venv && ./tools/test-js-with-puppeteer mention-notification'
+```
+
+**Blocked before browser execution.** Database setup reported conflicting leaf
+migrations `0816_mentionnotification` and
+`0818_usersetting_web_right_click_opens_message_actions_menu` in `zerver`.
+This integration defect needs a separate issue and resolution; no migration was
+added in this validation. Earlier setup attempts failed on missing development
+secrets, log directory, and generated emoji data. `./tools/provision` generated
+the emoji data but did not complete: RabbitMQ's node was not running. Provisioning
+also updated shared container dependencies; the original source changes were not
+overwritten.
+
+No browser acceptance scenario ran at this base, so CA1, CA2, CA4 and CA5 have
+no new passing browser evidence. Inspection of the published test shows checks
+for zero notifications without Notify, one with Notify, unchanged subscriptions,
+stale selections after mention removal, channel change and cancellation, and an
+independent Subscribe action. It checks for an original-message ID in a link and
+the presence of `quote`, but does not follow the link as the recipient or compare
+the quoted text. Those checks, an expanded-test run and a completed provision
+remain pending. The earlier successful run against `f828a971` with local test
+changes does not establish results for this base.
+
 Initial work: 2026-11-08. Validation resumed on 2026-11-09 (America/Guatemala).
 Backend, concurrent delivery, Node and migration checks now pass. Browser
 integration and final acceptance remain pending.
@@ -26,17 +105,17 @@ checks were bypassed. The new migration was applied on PostgreSQL. Its initial
 AutoField declaration was corrected to match Zulip's BigAutoField default,
 then reversed and reapplied in the disposable development database.
 
-| Resumed command inside `/home/github/zulip`, with `.venv` active | Actual result |
-| --- | --- |
-| `./tools/test-backend --coverage --no-html-report --include-transaction-tests zerver.tests.test_mention_notification zerver.tests.test_message_send zerver.tests.test_openapi` | PASS, 134 tests in 41.509 seconds |
-| `./tools/test-js-with-node` | PASS, full Node suite |
-| `./tools/test-js-with-node compose.test.cjs compose_validate.test.cjs echo.test.cjs transmit.test.cjs` | PASS, four focused modules |
-| `./tools/test-js-with-node compose_validate.test.cjs` after the active-user fix | PASS |
-| `./tools/test-migrations` | PASS, no model/migration changes detected |
-| `./tools/lint` over affected Python, web, templates, OpenAPI and integration test files | Passed after the first round of corrections. Final rerun remains pending after the active-user change |
-| Mermaid CLI 12.2.0 with installed Chrome | PASS, sequence parsed and rendered to SVG |
-| `./tools/test-js-with-puppeteer mention-notification` | Initially failed because Notify was hidden for active users with omitted `is_active`. Fixed using `people.is_active_user`. Next attempt reached Notify but the keyboard-selection assertion failed. Foreground-session and event-wait corrections await a rerun |
-| `coverage report` after the backend process exited | No retained data, because the runner cleans it by default. A rerun with `--no-cov-cleanup` is needed before claiming a coverage percentage |
+| Resumed command inside `/home/github/zulip`, with `.venv` active                                                                                                               | Actual result                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `./tools/test-backend --coverage --no-html-report --include-transaction-tests zerver.tests.test_mention_notification zerver.tests.test_message_send zerver.tests.test_openapi` | PASS, 134 tests in 41.509 seconds                                                                                                                                                                                                                               |
+| `./tools/test-js-with-node`                                                                                                                                                    | PASS, full Node suite                                                                                                                                                                                                                                           |
+| `./tools/test-js-with-node compose.test.cjs compose_validate.test.cjs echo.test.cjs transmit.test.cjs`                                                                         | PASS, four focused modules                                                                                                                                                                                                                                      |
+| `./tools/test-js-with-node compose_validate.test.cjs` after the active-user fix                                                                                                | PASS                                                                                                                                                                                                                                                            |
+| `./tools/test-migrations`                                                                                                                                                      | PASS, no model/migration changes detected                                                                                                                                                                                                                       |
+| `./tools/lint` over affected Python, web, templates, OpenAPI and integration test files                                                                                        | Passed after the first round of corrections. Final rerun remains pending after the active-user change                                                                                                                                                           |
+| Mermaid CLI 12.2.0 with installed Chrome                                                                                                                                       | PASS, sequence parsed and rendered to SVG                                                                                                                                                                                                                       |
+| `./tools/test-js-with-puppeteer mention-notification`                                                                                                                          | Initially failed because Notify was hidden for active users with omitted `is_active`. Fixed using `people.is_active_user`. Next attempt reached Notify but the keyboard-selection assertion failed. Foreground-session and event-wait corrections await a rerun |
+| `coverage report` after the backend process exited                                                                                                                             | No retained data, because the runner cleans it by default. A rerun with `--no-cov-cleanup` is needed before claiming a coverage percentage                                                                                                                      |
 
 The first executions found and corrected JSON form encoding missing from OpenAPI,
 an obsolete DM-recipient constant in the test, test mocks requiring explicit
@@ -65,13 +144,13 @@ keydown handler now preserves native Space activation for Notify and Subscribe,
 with `mention_actions_keep_native_space_activation` covering the event handling.
 These latest changes await Docker execution and final lint.
 
-| Current acceptance criterion | Verified result | Remaining work |
-| --- | --- | --- |
-| CA1 | Explicit-consent backend and toggle unit tests passed | Execute latest keyboard fix and browser flow |
-| CA2 | Backend asserts bot sender, recipient, original link, quote, one DM and unchanged channel subscriptions | Complete recipient browser walkthrough |
-| CA3 | Denied recipient and actor cases, private access and revoked-access tests passed | Final human security review |
-| CA4 | Rollback, helper failure, sequential duplicate suppression and real concurrent delivery passed | Execute browser cancellation, removed-mention and channel-reset cases |
-| CA5 | Ordinary send and OpenAPI regressions plus full Node suite passed | Execute latest web changes, integration and final visual review |
+| Current acceptance criterion | Verified result                                                                                         | Remaining work                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| CA1                          | Explicit-consent backend and toggle unit tests passed                                                   | Execute latest keyboard fix and browser flow                          |
+| CA2                          | Backend asserts bot sender, recipient, original link, quote, one DM and unchanged channel subscriptions | Complete recipient browser walkthrough                                |
+| CA3                          | Denied recipient and actor cases, private access and revoked-access tests passed                        | Final human security review                                           |
+| CA4                          | Rollback, helper failure, sequential duplicate suppression and real concurrent delivery passed          | Execute browser cancellation, removed-mention and channel-reset cases |
+| CA5                          | Ordinary send and OpenAPI regressions plus full Node suite passed                                       | Execute latest web changes, integration and final visual review       |
 
 Observed backend metrics include zero unauthorized DMs in the tested denied
 cases, zero channel-subscription changes in the successful notification test,
@@ -159,26 +238,26 @@ does not modify global Git configuration. Initial plain Git commands failed with
 `detected dubious ownership`; initial fetch failed writing `.git/FETCH_HEAD`.
 The approved escalated fetch succeeded.
 
-| Command | Actual outcome |
-| --- | --- |
-| `git ... status --short`, `branch --show-current`, `rev-parse HEAD`, `remote -v`, `log -5 --oneline` | Baseline above; clean initial worktree |
-| `git ... fetch upstream main` | Succeeded after sandbox escalation |
-| `git ... rev-list --left-right --count HEAD...upstream/main` | `0 0` |
-| `docker info` outside sandbox | Failed: Docker daemon pipe not found |
-| `bash -lc 'uname -a'` | Failed: WSL update required |
-| `python tools/test-backend zerver.tests.test_mention_notification` | Blocked before collection: `ValueError: cannot find context for 'fork'` |
-| `python tools/test-js-with-node compose_validate` | Blocked before collection: `ModuleNotFoundError: No module named 'pwd'` |
-| `python tools/test-js-with-node compose.test.cjs compose_validate.test.cjs echo.test.cjs transmit.test.cjs` | Final focused attempt also blocked on `pwd` before collection |
-| `python tools/lint zerver/actions/mention_notification.py` | Blocked before lint: `ModuleNotFoundError: No module named 'pwd'` |
-| `python -c "import django; print(django.get_version())"` | Failed: Django not installed |
-| `python tools/create-api-changelog` | Created `ZF-22b239.md`; automatic staging failed due Git ownership check; retained and filled the generated file |
-| `python -m ruff check` on six affected Python files | Passed after correcting imports, unused binding, mutable default and context-manager formatting |
-| `python -m ruff format` on those files | Applied formatting; not a substitute for Zulip lint |
-| Python `ast.parse` on six affected Python files | Passed |
-| `node --check` on `compose.test.cjs`, `compose_validate.test.cjs`, `lib/compose_banner.cjs` | Passed syntax checks only |
-| `python tools/test-migrations` | Incorrect invocation of a Bash script; SyntaxError. Corrected with the command below |
-| `bash -lc './tools/test-migrations'` | Blocked: WSL update required |
-| `git ... diff --check` | Passed final static review |
+| Command                                                                                                     | Actual outcome                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `git ... status --short`, `branch --show-current`, `rev-parse HEAD`, `remote -v`, `log -5 --oneline`        | Baseline above; clean initial worktree                                                                           |
+| `git ... fetch upstream main`                                                                               | Succeeded after sandbox escalation                                                                               |
+| `git ... rev-list --left-right --count HEAD...upstream/main`                                                | `0 0`                                                                                                            |
+| `docker info` outside sandbox                                                                               | Failed: Docker daemon pipe not found                                                                             |
+| `bash -lc 'uname -a'`                                                                                       | Failed: WSL update required                                                                                      |
+| `python tools/test-backend zerver.tests.test_mention_notification`                                          | Blocked before collection: `ValueError: cannot find context for 'fork'`                                          |
+| `python tools/test-js-with-node compose_validate`                                                           | Blocked before collection: `ModuleNotFoundError: No module named 'pwd'`                                          |
+| `python tools/test-js-with-node compose.test.cjs compose_validate.test.cjs echo.test.cjs transmit.test.cjs` | Final focused attempt also blocked on `pwd` before collection                                                    |
+| `python tools/lint zerver/actions/mention_notification.py`                                                  | Blocked before lint: `ModuleNotFoundError: No module named 'pwd'`                                                |
+| `python -c "import django; print(django.get_version())"`                                                    | Failed: Django not installed                                                                                     |
+| `python tools/create-api-changelog`                                                                         | Created `ZF-22b239.md`; automatic staging failed due Git ownership check; retained and filled the generated file |
+| `python -m ruff check` on six affected Python files                                                         | Passed after correcting imports, unused binding, mutable default and context-manager formatting                  |
+| `python -m ruff format` on those files                                                                      | Applied formatting; not a substitute for Zulip lint                                                              |
+| Python `ast.parse` on six affected Python files                                                             | Passed                                                                                                           |
+| `node --check` on `compose.test.cjs`, `compose_validate.test.cjs`, `lib/compose_banner.cjs`                 | Passed syntax checks only                                                                                        |
+| `python tools/test-migrations`                                                                              | Incorrect invocation of a Bash script; SyntaxError. Corrected with the command below                             |
+| `bash -lc './tools/test-migrations'`                                                                        | Blocked: WSL update required                                                                                     |
+| `git ... diff --check`                                                                                      | Passed final static review                                                                                       |
 
 No backend, Node, migration, browser, integration, or remote CI pass is claimed.
 No concurrency result is claimed: the test uses real connections but has not run.
@@ -186,13 +265,13 @@ Mermaid rendering is unverified; no installed renderer was found.
 
 ## CA1–CA5 acceptance matrix
 
-| Criterion | Automated evidence authored | Outcome / remaining verification |
-| --- | --- | --- |
-| CA1 explicit consent | `test_no_consent_and_no_actual_mention`; web eligibility additions; `notify_toggle_requires_explicit_action` in `compose.test.cjs` | Execution blocked; keyboard verification pending |
-| CA2 correct bot DM and unchanged subscription | `test_explicit_delivery_and_retry` checks bot count, recipient receipt, link, quote, before/after subscriptions | Execution blocked |
-| CA3 authorization | `test_ineligible_recipients`, private/revoked-access test, allowed private/web-public test, code/silent-mention negatives, permission revocation between send and delivery | Execution blocked; generic API non-disclosure response tests still needed |
-| CA4 cancel/failure/retry/concurrency | Existing stale-banner removal tests; rollback/failure tests; real two-connection `test_concurrent_delivery` | Execution blocked; automated click/cancel/channel-reset lifecycle tests still needed |
-| CA5 regressions and integration | Subscribed-mention receipt test; existing subscribe handler retained; walkthrough below | Execution blocked; full browser/server/bot walkthrough pending |
+| Criterion                                     | Automated evidence authored                                                                                                                                                | Outcome / remaining verification                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| CA1 explicit consent                          | `test_no_consent_and_no_actual_mention`; web eligibility additions; `notify_toggle_requires_explicit_action` in `compose.test.cjs`                                         | Execution blocked; keyboard verification pending                                     |
+| CA2 correct bot DM and unchanged subscription | `test_explicit_delivery_and_retry` checks bot count, recipient receipt, link, quote, before/after subscriptions                                                            | Execution blocked                                                                    |
+| CA3 authorization                             | `test_ineligible_recipients`, private/revoked-access test, allowed private/web-public test, code/silent-mention negatives, permission revocation between send and delivery | Execution blocked; generic API non-disclosure response tests still needed            |
+| CA4 cancel/failure/retry/concurrency          | Existing stale-banner removal tests; rollback/failure tests; real two-connection `test_concurrent_delivery`                                                                | Execution blocked; automated click/cancel/channel-reset lifecycle tests still needed |
+| CA5 regressions and integration               | Subscribed-mention receipt test; existing subscribe handler retained; walkthrough below                                                                                    | Execution blocked; full browser/server/bot walkthrough pending                       |
 
 ## Required supported-environment checks
 
@@ -225,7 +304,7 @@ Run the visual-test skill's Puppeteer workflow once the environment works.
    Follow the link and compare subscriptions with step 1; they must be unchanged.
 5. Repeat with Notify selected, then delete the mention; with channel changed;
    and with compose cancelled/reopened. Send the new drafts and verify no stale DM.
-6. Force an original-send rejection (e.g. revoke A's channel send permission),
+6. Force an original-send rejection (e.g., revoke A's channel send permission),
    verify no DM, restore permission and retry the same failed message. Check that
    intent belongs to that failed local message. Sending a second original is a
    separate notification pair.
@@ -245,9 +324,9 @@ Actions if required, publish the feature branch, open a PR **to the CoreX fork**
 inspect the Zulip CI matrix and attach run/job URLs and outcomes. No workflow
 change, remote run, branch protection, review, or merge is claimed.
 
-| Acceptance | Issue | Branch / commit | PR | Review | CI | Acceptance |
-| --- | --- | --- | --- | --- | --- | --- |
-| CA1–CA5 | [#7719](https://github.com/zulip/zulip/issues/7719) | `feature/7719-notify-without-subscribing`; commit pending | Pending team publication | Pending teammate review | Pending fork PR run | Pending runtime checks and remaining tests |
+| Acceptance | Issue                                               | Branch / commit                                           | PR                       | Review                  | CI                  | Acceptance                                 |
+| ---------- | --------------------------------------------------- | --------------------------------------------------------- | ------------------------ | ----------------------- | ------------------- | ------------------------------------------ |
+| CA1–CA5    | [#7719](https://github.com/zulip/zulip/issues/7719) | `feature/7719-notify-without-subscribing`; commit pending | Pending team publication | Pending teammate review | Pending fork PR run | Pending runtime checks and remaining tests |
 
 - M1: 0 criteria verified at runtime; 5 pending. This is not 5 passing criteria.
 - M2: unauthorized delivery and subscription-change counts unmeasured.

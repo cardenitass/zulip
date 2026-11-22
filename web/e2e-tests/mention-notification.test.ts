@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {execFileSync} from "node:child_process";
 
 import type {Page} from "puppeteer";
+import * as z from "zod/mini";
 
 import * as common from "./lib/common.ts";
 
@@ -11,7 +12,7 @@ async function api(
     method: string,
     parameters: Record<string, string> = {},
 ): Promise<Record<string, unknown>> {
-    return await page.evaluate(
+    const result: unknown = await page.evaluate(
         async ({path, method, parameters}) => {
             const csrf = document.querySelector<HTMLInputElement>(
                 "input[name=csrfmiddlewaretoken]",
@@ -28,15 +29,26 @@ async function api(
                 },
                 ...(method !== "GET" && {body: query}),
             });
-            const data = await response.json();
-            if (!response.ok || data.result !== "success") {
+            const data: unknown = await response.json();
+            if (!response.ok) {
                 throw new Error(JSON.stringify(data));
             }
             return data;
         },
         {path, method, parameters},
     );
+    const data = z.record(z.string(), z.unknown()).parse(result);
+    assert.equal(data["result"], "success");
+    return data;
 }
+
+const message_schema = z.object({
+    id: z.number(),
+    sender_id: z.number(),
+    type: z.string(),
+    content: z.string(),
+    sender_email: z.string(),
+});
 
 async function notification_count(page: Page): Promise<number> {
     const data = await api(page, "/json/messages", "GET", {
@@ -45,7 +57,7 @@ async function notification_count(page: Page): Promise<number> {
         num_after: "0",
         apply_markdown: "false",
     });
-    const messages = data["messages"] as {type: string; content: string; sender_email: string}[];
+    const messages = z.array(message_schema).parse(data["messages"]);
     const notifications = messages.filter(
         (message) =>
             message.type === "private" &&
@@ -80,13 +92,14 @@ async function send(page: Page): Promise<number> {
     await page.click("#compose-send-button");
     const result = await response;
     assert.equal(result.status(), 200);
-    const data = await result.json();
-    assert.equal(data.result, "success");
+    const data: unknown = await result.json();
+    const parsed = z.object({result: z.string(), id: z.number()}).parse(data);
+    assert.equal(parsed.result, "success");
     await page.waitForFunction(() => {
         const textarea = document.querySelector<HTMLTextAreaElement>("#compose-textarea");
         return textarea?.value === "";
     });
-    return data.id as number;
+    return parsed.id;
 }
 
 async function test_notifications(page: Page): Promise<void> {
@@ -98,7 +111,7 @@ async function test_notifications(page: Page): Promise<void> {
         .split("\n")
         .find((line) => line.startsWith(email))
         ?.trim()
-        .split(/\s+/)[1];
+        .split(/\s+/, 2)[1];
     assert.ok(password);
     await api(page, "/json/users/me/subscriptions", "POST", {
         subscriptions: JSON.stringify([{name: "CoreX notifications"}]),
@@ -115,8 +128,13 @@ async function test_notifications(page: Page): Promise<void> {
         await send(page);
         assert.equal(await notification_count(recipient), 0);
 
+        const quoted_text = "A distinctive message for the notification quote.";
         await start_mention(page);
+        await page.focus("#compose-textarea");
+        await page.keyboard.press("End");
+        await page.type("#compose-textarea", ` ${quoted_text}`);
         const notify = "#compose_banners .notify-mentioned-user";
+        await page.waitForSelector(notify, {visible: true});
         await page.focus(notify);
         await page.keyboard.press("Tab");
         await page.keyboard.down("Shift");
@@ -156,12 +174,31 @@ async function test_notifications(page: Page): Promise<void> {
             num_after: "0",
             apply_markdown: "false",
         });
-        const dm = (messages["messages"] as {type: string; content: string}[]).find(
-            (message) =>
-                message.type === "private" && message.content.includes(`/near/${original_id}`),
-        );
+        const dm = z
+            .array(message_schema)
+            .parse(messages["messages"])
+            .find(
+                (message) =>
+                    message.type === "private" && message.content.includes(`/near/${original_id}`),
+            );
         assert.ok(dm);
-        assert.ok(dm.content.includes("quote"));
+        assert.ok(dm.content.includes(quoted_text));
+        await recipient.goto(`http://zulip.zulipdev.com:9981/#narrow/dm/${dm.sender_id}`);
+        const dm_row = `.message_row[data-message-id="${dm.id}"]`;
+        await recipient.waitForSelector(`${dm_row} .message_content`, {visible: true});
+        const quote = await recipient.$eval(`${dm_row} blockquote p:first-child`, (element) =>
+            element.textContent?.trim(),
+        );
+        await recipient.click(`${dm_row} a[href*="/near/${original_id}"]`);
+        await recipient.waitForSelector(`.message_row[data-message-id="${original_id}"]`, {
+            visible: true,
+        });
+        const original_text = await recipient.$eval(
+            `.message_row[data-message-id="${original_id}"] .message_content p:first-child`,
+            (element) => element.textContent?.trim(),
+        );
+        assert.equal(original_text?.slice(-quoted_text.length), quoted_text);
+        assert.equal(quote?.slice(-quoted_text.length), quoted_text);
         assert.deepEqual(
             await api(recipient, "/json/users/me/subscriptions", "GET"),
             subscriptions_before,
@@ -197,9 +234,10 @@ async function test_notifications(page: Page): Promise<void> {
         await page.waitForSelector("#compose_banners .recipient_not_subscribed", {hidden: true});
         const subscribed = await api(recipient, "/json/users/me/subscriptions", "GET");
         assert.ok(
-            (subscribed["subscriptions"] as {name: string}[]).some(
-                (subscription) => subscription.name === "CoreX notifications",
-            ),
+            z
+                .array(z.object({name: z.string()}))
+                .parse(subscribed["subscriptions"])
+                .some((subscription) => subscription.name === "CoreX notifications"),
         );
         console.log("CoreX integration: one explicit DM, zero duplicate or stale-intent DMs");
     } finally {
