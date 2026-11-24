@@ -1,5 +1,44 @@
 # CoreX AV2 — evidence and handoff
 
+## Backend follow-up — 2026-11-21
+
+Local validation for the second CoreX contribution used the clean base
+`36701dd953682d994f4edce16b6765ca6f643d50`, which includes PR #4. A separate
+Docker container, `corex-backend-7719`, ran a clean checkout and independent
+PostgreSQL, Redis and RabbitMQ services. Its provisioning and test databases
+were isolated from the existing `corex-av2` container. Before the base run,
+the checkout was clean; the SHA-1 blobs for `test_mention_notification.py` and
+`test_message_send.py` were `aa2869dcf3f4426cbc68025e3331d1f8994816cd` and
+`c3bbcb58b72dbee493fdfc24d4214dc73cef7aab`, respectively.
+
+Both the base run and the final run used the command below after activating
+the virtual environment. The base used the existing tests; the final run used
+the same base plus the uncommitted assertions in this contribution.
+
+```bash
+./tools/test-backend --include-transaction-tests zerver.tests.test_mention_notification zerver.tests.test_message_send
+```
+
+Both runs passed **113 of 113 tests**, including the transaction test. No new
+test method was added; assertions were strengthened in two existing methods.
+`./tools/lint zerver/tests/test_mention_notification.py docs/evidence/av2.md`
+passed after formatting the evidence.
+
+| Criterion | Existing case                                                                                                                                              | Expected result                                                                                                                 | Observed result in both runs                                                                                    |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| CA1, CA2  | `test_no_consent_and_no_actual_mention`, `test_explicit_delivery_and_retry`                                                                                | No DM without consent; one bot DM for an eligible recipient, with original link and quote, and unchanged channel subscriptions. | Passed. The final run also explicitly asserted the target was not actively subscribed before sending.           |
+| CA3       | `test_private_channel_and_revoked_access`, `test_permission_revoked_between_send_and_delivery`                                                             | A recipient without access is skipped and receives no notice.                                                                   | Passed. The final run also explicitly checked no new bot DM or delivery record in the private-channel case.     |
+| CA5       | `test_subscribed_mention_keeps_ordinary_delivery`                                                                                                          | A subscribed recipient receives the usual mention and no extra bot DM.                                                          | Passed; the original `UserMessage` had the mentioned flag.                                                      |
+| CA4       | `test_original_send_rejected`, `test_rollback_includes_original_and_dm`, `test_missing_dm_rolls_back_original`, `test_failed_delivery_rolls_back_original` | A rejected original or failed delivery leaves no bot notice or delivery record.                                                 | Passed for the tested rejection and rollback paths.                                                             |
+| CA4       | `test_explicit_delivery_and_retry`                                                                                                                         | A sequential retry of the same message–recipient pair produces no second DM.                                                    | Passed; the retry returned false and the bot message count stayed unchanged.                                    |
+| CA4       | `test_concurrent_delivery`                                                                                                                                 | Two concurrent attempts for the same pair produce one successful delivery.                                                      | Passed; two separate connections returned one true and one false, with one new message and one delivery record. |
+
+These results apply to the tested scenarios and do not establish all possible
+authorization, performance or browser behavior. No production defect was found
+in these runs. Codex assisted with inspecting the tests, adding assertions,
+preparing the isolated environment, running commands and drafting this evidence.
+Carlos Montero Castro's human review and acceptance remain pending.
+
 ## Follow-up validation — 2026-11-21
 
 Local validation on `test/7719-notify-e2e` used base
